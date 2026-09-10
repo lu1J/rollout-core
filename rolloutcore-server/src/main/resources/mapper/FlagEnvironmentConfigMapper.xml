@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.lu1j.rolloutcore.server.mapper.FlagEnvironmentConfigMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ff_flag_config (flag_id, environment_id, enabled, default_variant_id, version, created_at, updated_at)
+        VALUES (#{flagId}, #{environmentId}, #{enabled}, #{defaultVariantId}, #{version}, #{createdAt}, #{updatedAt})
+    </insert>
+    <select id="find" resultType="io.github.lu1j.rolloutcore.domain.FlagEnvironmentConfig">
+        SELECT id, flag_id, environment_id, enabled, default_variant_id, version, created_at, updated_at
+        FROM ff_flag_config WHERE flag_id = #{flagId} AND environment_id = #{environmentId}
+    </select>
+    <update id="update">
+        UPDATE ff_flag_config
+        SET enabled = #{config.enabled},
+            default_variant_id = #{config.defaultVariantId},
+            version = version + 1,
+            updated_at = #{config.updatedAt}
+        WHERE id = #{config.id}
+          AND version = #{expectedVersion}
+    </update>
+</mapper>

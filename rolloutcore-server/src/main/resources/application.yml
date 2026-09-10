@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: rolloutcore-server
+  datasource:
+    url: ${ROLLOUTCORE_DB_URL:jdbc:mysql://127.0.0.1:3306/rolloutcore?connectionTimeZone=UTC}
+    username: ${ROLLOUTCORE_DB_USERNAME:rolloutcore}
+    password: ${ROLLOUTCORE_DB_PASSWORD}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+server:
+  error:
+    include-message: never
+    include-stacktrace: never

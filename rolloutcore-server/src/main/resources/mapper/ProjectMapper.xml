@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.lu1j.rolloutcore.server.mapper.ProjectMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ff_project (project_key, name, status, created_at)
+        VALUES (#{projectKey}, #{name}, #{status}, #{createdAt})
+    </insert>
+    <select id="findByKey" resultType="io.github.lu1j.rolloutcore.domain.Project">
+        SELECT id, project_key, name, status, created_at FROM ff_project WHERE project_key = #{projectKey}
+    </select>
+</mapper>
