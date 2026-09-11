@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.*;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import java.util.List;
+import io.github.lu1j.rolloutcore.server.evaluation.EvaluationCommands.*;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -111,6 +112,13 @@ public class ControlPlaneController {
                 a.getId(), a.getProjectId(), a.getEnvironmentId(), a.getFlagId(),
                 a.getOperatorName(), a.getOperation(), a.getBeforeJson() == null ? null : json.readTree(a.getBeforeJson()),
                 json.readTree(a.getAfterJson()), a.getCreatedAt())).toList();
+    }
+
+    @PutMapping("/projects/{projectKey}/environments/{envKey}/flags/{flagKey}/evaluation-policy")
+    public PolicyResponse updatePolicy(@PathVariable String projectKey, @PathVariable String envKey,
+            @PathVariable String flagKey, @Valid @RequestBody UpdatePolicy command,
+            @RequestHeader("X-Operator") String operator) {
+        return service.updatePolicy(projectKey, envKey, flagKey, command, operator);
     }
 
     private VariantResponse variantResponse(FlagVariant v) {

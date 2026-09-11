@@ -114,4 +114,35 @@ class TransactionBoundaryTest extends ServiceFixture {
         verify(connection).close();
         assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
     }
+
+    @Test void policyAndAuditCommitInSameTransaction() throws Exception {
+        when(variants.listByFlag(3)).thenReturn(List.of(variant));
+        when(configs.updatePolicy(any(), eq(0L))).thenAnswer(inv -> {
+            assertTrue(TransactionSynchronizationManager.isActualTransactionActive()); return 1;
+        });
+        when(audits.insert(any())).thenAnswer(inv -> {
+            assertTrue(TransactionSynchronizationManager.isActualTransactionActive()); return 1;
+        });
+        service.updatePolicy("shop", "prod", "pay",
+                new io.github.lu1j.rolloutcore.server.evaluation.EvaluationCommands.UpdatePolicy(0L, null, null), "alice");
+        var order = inOrder(configs, audits, connection);
+        order.verify(configs).updatePolicy(any(), eq(0L)); order.verify(audits).insert(any()); order.verify(connection).commit();
+    }
+
+    @Test void policyAuditFailureRollsBackConfigWrite() throws Exception {
+        when(variants.listByFlag(3)).thenReturn(List.of(variant));
+        when(configs.updatePolicy(any(), anyLong())).thenReturn(1);
+        when(audits.insert(any())).thenThrow(new DataIntegrityViolationException("audit unavailable"));
+        assertThrows(DataIntegrityViolationException.class, () -> service.updatePolicy("shop", "prod", "pay",
+                new io.github.lu1j.rolloutcore.server.evaluation.EvaluationCommands.UpdatePolicy(0L, null, null), "alice"));
+        verify(configs).updatePolicy(any(), eq(0L)); verify(connection).rollback(); verify(connection, never()).commit();
+    }
+
+    @Test void policySqlConflictRollsBackWithoutAudit() throws Exception {
+        when(variants.listByFlag(3)).thenReturn(List.of(variant));
+        when(configs.updatePolicy(any(), anyLong())).thenReturn(0);
+        assertThrows(OptimisticLockConflictException.class, () -> service.updatePolicy("shop", "prod", "pay",
+                new io.github.lu1j.rolloutcore.server.evaluation.EvaluationCommands.UpdatePolicy(0L, null, null), "alice"));
+        verifyNoInteractions(audits); verify(connection).rollback(); verify(connection, never()).commit();
+    }
 }

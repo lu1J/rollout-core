@@ -1,6 +1,6 @@
 # RolloutCore
 
-RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1 实现 Control Plane：管理项目、环境、Flag 定义、类型化 Variant、环境配置和审计。当前是模块化单体，尚未实现请求求值、灰度分流或客户端分发。
+RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1 实现 Control Plane：管理项目、环境、Flag 定义、类型化 Variant、环境配置和审计。Day2 在现有模块化单体上增加可解释、确定性的 Evaluation Engine、规则匹配和百分比分流；客户端分发尚未实现。
 
 ## Day1 能力
 
@@ -12,7 +12,7 @@ RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1 实�
 - 仅开放 Actuator health。
 - 默认测试不依赖外部 MySQL，不使用 H2 或 Docker。
 
-Control Plane 负责配置写入和管理；Data Plane 将来负责应用请求中的 Flag 求值。Day1 的 Kill Switch 只修改数据库中对应环境配置的 enabled 状态，不代表已有 SDK 能立即感知变化，也不定义禁用时的求值返回值。
+Control Plane 负责配置写入和管理；Day2 的 EvaluationService 负责请求中的 Flag 求值，直接读 MySQL。Kill Switch 关闭时返回配置的 defaultVariant，reason=DISABLED；不意味着 value 一定为 false，也不代表已有 SDK 或推送机制。
 
 ## 模块
 
@@ -144,15 +144,66 @@ powershell -ExecutionPolicy Bypass -File scripts/day1-e2e.ps1
 脚本访问实际 HTTP 服务，创建 checkout-service → prod → new-payment-flow → old=false/new=true，
 验证 config version 0 → enable 1 → disable 2 → 旧版本 409，并检查审计。脚本不会启动、停止服务或删除数据。重复执行应使用独立项目 Key，例如 `-ProjectKey checkout-service-2`；默认 Key 已存在时会明确失败，不复用或清空已有数据。
 
-## Known Limitations / Day2 准备
+## Day2 Evaluation
+
+`POST /api/v1/evaluate` 无需 X-Operator（只读、不写 Audit）：
+
+```json
+{
+  "projectKey": "checkout-service",
+  "environmentKey": "prod",
+  "flagKey": "new-payment-flow",
+  "context": {"userId": "user-123", "country": "JP", "vipLevel": 5, "appVersion": "2.3.1", "attributes": {"plan": "pro"}}
+}
+```
+
+响应包含 `flagKey / variantKey / value / reason / configVersion / matchedRulePriority / bucket`。
+value 保留 BOOLEAN、STRING、NUMBER、JSON 类型。规则命中返回 priority；仅百分比分流返回 bucket，其余情况对应解释字段为 null。
+求值顺序：关闭 → defaultVariant/DISABLED；规则首个命中 → RULE_MATCH；无命中且有 rollout → PERCENTAGE_ROLLOUT；否则 → defaultVariant/DEFAULT。
+
+`PUT /api/v1/projects/{projectKey}/environments/{envKey}/flags/{flagKey}/evaluation-policy` 必须带 X-Operator：
+
+```json
+{
+  "expectedVersion": 0,
+  "rules": [{"priority": 10, "match": "ALL", "conditions": [
+    {"attribute": "country", "operator": "EQ", "value": "JP"},
+    {"attribute": "vipLevel", "operator": "GTE", "value": 3}
+  ], "variantKey": "new"}],
+  "rollout": [{"variantKey": "new", "weight": 1000}, {"variantKey": "old", "weight": 9000}]
+}
+```
+
+成功返回 `{"version":1,"policy":{...}}`。这是完整策略替换；`{"expectedVersion":1}` 清空规则和 rollout。
+rules 缺省/null/空数组表示无规则；rollout 缺省/null 表示不分流，空数组不合法。存在 rollout 时整数权重之和必须为 10000。
+priority 非负且不重复，越小越优先；ALL=AND，ANY=OR，first-match-wins。
+支持 EQ/NEQ/IN/NOT_IN/GT/GTE/LT/LTE/CONTAINS；缺失字段或类型不兼容均不匹配，负向操作符也不例外。
+内置字段优先；appVersion 仅精确 EQ/NEQ/IN/NOT_IN；无 SemVer range。userId 必填、最长 256 字符、禁止 NUL。
+上限：100 条 Rule、每条 1–20 条 Condition、100 个 allocation、IN/NOT_IN 1–100 个同类型标量。
+同一项目/环境/Flag/userId 使用永久固定的 UTF-8 + NUL 分隔 + SHA-256 前四字节大端无符号值 %10000，得到 0–9999。
+
+V2 新增 `evaluation_policy_json JSON NULL`，未修改 V1。policy 与原有开关/默认值共用 config version 乐观锁，stale 返回 409 `optimistic_lock_conflict`，成功更新和 `EVALUATION_POLICY_UPDATED` 审计同事务。
+
+```powershell
+mvn -pl rolloutcore-server -am test
+mvn clean verify
+# 启动连接真实 MySQL 的新 JAR 后执行；默认生成唯一 ProjectKey，不清理数据。
+powershell -ExecutionPolicy Bypass -File scripts/day2-e2e.ps1
+```
+
+Day2 真实数据库验证状态：`REAL_MYSQL_DAY2_E2E=NOT_RUN`，当前执行环境未提供数据库密码。自动测试不能代替真实 V2 迁移和 HTTP 持久化验证。详见 [Day2 报告](docs/DAY2_REPORT.md)。
+
+Day2 最终自动验证：235 项测试全部通过（Day1 129 + Day2 106），`mvn clean verify` 成功；固定 5 万用户的 10% rollout 命中率为 10.122%。
+
+## Known Limitations / Day3 准备
 
 - 没有鉴权、租户权限、归档 API、删除 API、Variant 修改 API。
 - status 已建模，Day1 只创建 ACTIVE；尚无资源生命周期工作流。
-- Kill Switch 仅完成 Control Plane 持久化，未实现 Data Plane 求值或传播延迟保证。
-- 没有 Redis、Caffeine、Kafka、Outbox、规则引擎、灰度 Hash、OpenFeature、Docker、Prometheus 或压测。
+- Evaluation 仍直接读 MySQL；没有缓存或传播延迟保证，Day3 再优化 Data Plane latency/cache。
+- 没有 Redis、Caffeine、Kafka、Outbox、SDK 本地求值、OpenFeature、Docker、Prometheus 或压测。
 - 审计与业务共享数据库事务，没有外部投递或不可篡改保证；分页使用 offset。
 - 项目与环境的归属由 Service 和 scoped 查询保障；数据库外键保证资源存在，Variant 归属另有复合外键。绕过 Service 直接写库不属于支持的写入方式。
 - 默认自动测试不依赖 MySQL；真实 V1、HTTP 持久化与回滚已另行验证，实际并发竞争和 JSON/外键完整边界未穷尽验证。
-- domain / server 边界、独立配置、version 和预留模块可供 Day2 使用；没有提前实现未来功能。
+- 当前仍是一个 server module 内的逻辑边界；appVersion 无真正 SemVer range，策略不支持嵌套规则组、正则或任意代码执行。
 
 进一步阅读：[架构](docs/ARCHITECTURE.md)、[数据库](docs/DATABASE.md)、[Day1 交付报告](docs/DAY1_REPORT.md)。

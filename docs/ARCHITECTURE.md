@@ -1,4 +1,4 @@
-# Day1 架构
+# RolloutCore 架构（Day1 + Day2）
 
 ## 分层与模块边界
 
@@ -40,7 +40,7 @@ FlagEnvironmentConfig 保存 flagId、environmentId、enabled、defaultVariantId
 Variant 独立存储，一组有稳定 Key 和严格类型的值可以被多个环境复用。
 创建配置按 flagId + variantKey 查询；不能引用另一个 Flag 的 Variant。
 BOOLEAN 仍用两个普通 Variant 表达，不把 on/off 固定写进模型。
-禁用状态的 Data Plane 返回值语义尚未实现，不应将 enabled=false 自动等同于 value=false。
+Day2 禁用状态返回 defaultVariant，reason=DISABLED；enabled=false 不等同于 value=false。
 
 ## 请求、类型和归属规则
 
@@ -109,3 +109,37 @@ HTTP 框架自身的 404/405/415 等保留相应状态。
 
 真实 MySQL Flyway V1、完整 HTTP E2E、旧版本 409 和成功审计已验证；用户另行完成 UNIQUE 冲突触发的事务回滚实验。
 initial variants 重复 key 在首次写入前返回 validation_error，数据库 UNIQUE 保留兜底。实际并发竞争和 JSON/外键完整边界未穷尽验证。
+
+## Day2 求值与策略写入
+
+```text
+EvaluationController → EvaluationService（只读 REPEATABLE_READ 事务）
+                         ├─ ControlPlaneService → 原有 scoped Mapper → MySQL
+                         ├─ RuleEngine → priority 排序、ALL/ANY、类型安全匹配
+                         └─ StableBucketService → 固定 SHA-256 bucket
+ControlPlaneController → ControlPlaneService.updatePolicy（写事务）
+                         ├─ EvaluationPolicyValidator
+                         ├─ FlagEnvironmentConfigMapper.updatePolicy（CAS）
+                         └─ AuditLogMapper.insert
+```
+
+EvaluationService 编排读取和选择，RuleEngine 只负责匹配，StableBucketService 只负责 Hash。
+EvaluationPolicy / TargetingRule / RuleCondition / RolloutAllocation 是 server/evaluation 包内的 JSON 数据模型；
+domain 继续保持无 Jackson/Spring 依赖，Config 新增 evaluationPolicyJson 字符串用于持久化。
+EvaluationContext 含 userId/country/vipLevel/appVersion 和可选 attributes。内置字段名保留，不允许 attributes 覆盖；扩展 key 按字面匹配，不执行路径遍历。
+
+求值优先级严格为 DISABLED → RULE_MATCH → PERCENTAGE_ROLLOUT → DEFAULT。
+Rule 按 priority 从小到大排序，首个满足即停止；ALL 所有条件满足，ANY 任一满足。
+数字用 BigDecimal 比较，无字符串/布尔到数字的转换；missing 和 incompatible 均 false（包括 NEQ/NOT_IN）。
+扩展 attributes 显式 JSON null 可匹配 null；缺失字段不能匹配 null。内置字段为 null 视为缺失。
+IN/NOT_IN 要求非空同类型标量数组；字符串比较大小写敏感，CONTAINS 为字面子串。
+appVersion 只支持 EQ/NEQ/IN/NOT_IN，不支持 SemVer range。
+
+求值 public 方法使用 REPEATABLE_READ，让多次 scoped 查询在同一个 MySQL 快照读取配置和 Variants。
+目前复用 ControlPlaneService 的读接口，会重复读取 Project/Flag；这是 Day2 的简单读路径，Day3 再优化 latency/cache。
+求值无写入、不产生成功 Audit，响应只暴露 Variant value、原因、版本、命中 priority 或 bucket。
+
+policy 写入与 Day1 写入共用 checkVersion/persist，SQL 分别只写 policy 或 enabled/defaultVariant。
+两种 SQL 都使用同一行的 `WHERE id=? AND version=?` 和数据库原子 `version=version+1`。
+业务校验、旧快照、条件更新、新快照和 EVALUATION_POLICY_UPDATED 在一个写事务内；审计失败回滚。
+完整策略 JSON 便于未来作为缓存快照消费；当前没有缓存、SDK、消息推送或微服务拆分。

@@ -73,4 +73,19 @@ class ApplicationWiringTest {
                     .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("validation_error"));
         });
     }
+
+    @Test void day2UsesProductionStrictJsonAndProblemDetailConfiguration() {
+        runner.run(context -> {
+            assertNull(context.getStartupFailure());
+            var mvc = MockMvcBuilders.webAppContextSetup(context).build();
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put(
+                            "/api/v1/projects/shop/environments/prod/flags/pay/evaluation-policy")
+                    .header("X-Operator", "alice").contentType("application/json")
+                    .content("{\"expectedVersion\":0,\"rollout\":[{\"variantKey\":\"old\",\"weight\":10000.5}]}"))
+                    .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("validation_error"));
+            mvc.perform(post("/api/v1/evaluate").contentType("application/json")
+                    .content("{\"projectKey\":\"shop\",\"environmentKey\":\"prod\",\"flagKey\":\"pay\",\"context\":{\"userId\":\"u\",\"vipLevel\":\"5\"}}"))
+                    .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("validation_error"));
+        });
+    }
 }

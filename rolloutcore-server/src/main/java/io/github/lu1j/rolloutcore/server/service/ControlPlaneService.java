@@ -12,6 +12,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.HashSet;
+import java.util.stream.Collectors;
+import io.github.lu1j.rolloutcore.server.evaluation.EvaluationPolicy;
+import io.github.lu1j.rolloutcore.server.evaluation.EvaluationPolicyValidator;
+import io.github.lu1j.rolloutcore.server.evaluation.EvaluationCommands.*;
 
 @Service
 @Transactional(readOnly = true)
@@ -185,20 +189,55 @@ public class ControlPlaneService {
         return audits.list(getProject(projectKey).getId(), limit, offset);
     }
 
+    @Transactional
+    public PolicyResponse updatePolicy(String projectKey, String envKey, String flagKey,
+            UpdatePolicy command, String operator) {
+        rules.command(command);
+        InputRules.operator(operator);
+        Scope scope = scope(projectKey, envKey, flagKey);
+        FlagEnvironmentConfig current = config(scope);
+        checkVersion(current, command.expectedVersion());
+        EvaluationPolicy policy = command.policy();
+        new EvaluationPolicyValidator().validate(policy, variants.listByFlag(scope.flag().getId()).stream()
+                .map(FlagVariant::getVariantKey).collect(Collectors.toSet()));
+        String before = policySnapshot(current);
+        current.setEvaluationPolicyJson(json.writeValueAsString(policy));
+        persist(current, command.expectedVersion(), true);
+        auditJson(scope.projectId(), current.getEnvironmentId(), current.getFlagId(), operator,
+                "EVALUATION_POLICY_UPDATED", before, policySnapshot(current));
+        return new PolicyResponse(current.getVersion(), policy);
+    }
+
+    private String policySnapshot(FlagEnvironmentConfig config) {
+        return json.writeValueAsString(new PolicyAudit(config.getVersion(), config.getEvaluationPolicyJson() == null
+                ? null : json.readValue(config.getEvaluationPolicyJson(), EvaluationPolicy.class)));
+    }
+
+    private record PolicyAudit(long configVersion, EvaluationPolicy evaluationPolicy) {}
+
     private FlagEnvironmentConfig update(Scope scope, FlagEnvironmentConfig current, boolean enabled,
             Long variantId, long expectedVersion, String operator, String operation) {
         // Reject stale reads too: their audit 'before' snapshot would describe the wrong version.
-        if (current.getVersion() != expectedVersion) throw new OptimisticLockConflictException();
+        checkVersion(current, expectedVersion);
         String before = json.writeValueAsString(current);
         current.setEnabled(enabled);
         current.setDefaultVariantId(variantId);
-        current.setUpdatedAt(now());
-        // The conditional SQL update is the authority for concurrent writers.
-        if (configs.update(current, expectedVersion) == 0) throw new OptimisticLockConflictException();
-        current.setVersion(expectedVersion + 1);
+        persist(current, expectedVersion, false);
         auditJson(scope.projectId(), current.getEnvironmentId(), current.getFlagId(), operator,
                 operation, before, json.writeValueAsString(current));
         return current;
+    }
+
+    private static void checkVersion(FlagEnvironmentConfig current, long expectedVersion) {
+        if (current.getVersion() != expectedVersion) throw new OptimisticLockConflictException();
+    }
+
+    private void persist(FlagEnvironmentConfig current, long expectedVersion, boolean policyOnly) {
+        current.setUpdatedAt(now());
+        // Both write paths share the same version sequence; conditional SQL arbitrates concurrent writers.
+        int changed = policyOnly ? configs.updatePolicy(current, expectedVersion) : configs.update(current, expectedVersion);
+        if (changed == 0) throw new OptimisticLockConflictException();
+        current.setVersion(expectedVersion + 1);
     }
 
     private FlagVariant insertVariant(FeatureFlag flag, CreateVariant command) {

@@ -6,13 +6,21 @@
         VALUES (#{flagId}, #{environmentId}, #{enabled}, #{defaultVariantId}, #{version}, #{createdAt}, #{updatedAt})
     </insert>
     <select id="find" resultType="io.github.lu1j.rolloutcore.domain.FlagEnvironmentConfig">
-        SELECT id, flag_id, environment_id, enabled, default_variant_id, version, created_at, updated_at
+        SELECT id, flag_id, environment_id, enabled, default_variant_id, version, evaluation_policy_json, created_at, updated_at
         FROM ff_flag_config WHERE flag_id = #{flagId} AND environment_id = #{environmentId}
     </select>
     <update id="update">
         UPDATE ff_flag_config
         SET enabled = #{config.enabled},
             default_variant_id = #{config.defaultVariantId},
+            version = version + 1,
+            updated_at = #{config.updatedAt}
+        WHERE id = #{config.id}
+          AND version = #{expectedVersion}
+    </update>
+    <update id="updatePolicy">
+        UPDATE ff_flag_config
+        SET evaluation_policy_json = #{config.evaluationPolicyJson},
             version = version + 1,
             updated_at = #{config.updatedAt}
         WHERE id = #{config.id}

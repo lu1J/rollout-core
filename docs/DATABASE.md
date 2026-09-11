@@ -1,4 +1,4 @@
-# Day1 数据库
+# RolloutCore 数据库（Day1 + Day2）
 
 迁移文件：`rolloutcore-server/src/main/resources/db/migration/V1__init.sql`。
 目标为 MySQL 8.0.16+、InnoDB、utf8mb4。Key 列使用 utf8mb4_bin，避免大小写不敏感比较干扰稳定标识。
@@ -81,7 +81,7 @@ Audit 最少包含 project_id、可空 environment_id / flag_id、operator_name�
 before_json、after_json、created_at。支持的 operation：
 
 PROJECT_CREATED、ENVIRONMENT_CREATED、FLAG_CREATED、VARIANT_CREATED、
-CONFIG_CREATED、CONFIG_UPDATED、FLAG_ENABLED、FLAG_DISABLED。
+CONFIG_CREATED、CONFIG_UPDATED、FLAG_ENABLED、FLAG_DISABLED、EVALUATION_POLICY_UPDATED。
 
 审计与业务 INSERT/UPDATE 在同一个 Service 事务，保证“业务成功但无审计”不会成为正常成功结果。
 创建快照 before 为 SQL NULL，after 包含生成 id、业务字段和时间。
@@ -96,3 +96,33 @@ CONFIG_CREATED、CONFIG_UPDATED、FLAG_ENABLED、FLAG_DISABLED。
 用户在应用层 Fail Fast 加入前，用重复 initial variantKey 触发后续 UNIQUE 冲突，最终查询不到对应 FeatureFlag，确认真实事务回滚。
 现在 HashSet 在首次写入前拒绝重复 initial variantKey；UNIQUE (flag_id, variant_key) 保持不变。
 实际并发竞争和 JSON/外键完整边界未穷尽验证。
+
+## Day2 V2 migration
+
+V1 保持原样；新增 `db/migration/V2__add_evaluation_policy.sql`：
+
+```sql
+ALTER TABLE ff_flag_config ADD COLUMN evaluation_policy_json JSON NULL;
+```
+
+已执行 V1 的库在下一次启动执行 V2；空库顺序执行 V1、V2。旧 Config 的字段为 SQL NULL，创建配置仍允许无 policy。
+JSON 保存一个环境下一个 Flag 的完整策略，不新增规则表或基础设施依赖。
+数据库仅校验 JSON 格式；规则合法性、Variant 归属、priority 唯一和权重和由 EvaluationPolicyValidator 在写入前保证。
+不支持绕过 Service 直接写入策略，JSON 内的 variantKey 没有独立数据库外键。
+
+```sql
+UPDATE ff_flag_config
+SET evaluation_policy_json = #{config.evaluationPolicyJson},
+    version = version + 1,
+    updated_at = #{config.updatedAt}
+WHERE id = #{config.id}
+  AND version = #{expectedVersion}
+```
+
+这条语句保留 enabled/default_variant_id；原有普通配置 UPDATE 保留 evaluation_policy_json。
+两种更新竞争同一个 version，policy 无独立版本。stale 读取或条件更新影响 0 行都返回 409，并且不插入成功 Audit。
+before/after 是 JSON 对象，包含 `configVersion` 和 `evaluationPolicy`（初始值 null），与更新同事务。
+GET Config 的 evaluationPolicyJson 保持 domain 字符串表示；policy PUT 响应的 policy 为解析后的对象。
+
+自动测试加载真实 MyBatis XML，并使用 ResultSetHandler 验证列映射；迁移测试验证 V2 内容和 V1 原文校验和。
+这些测试不实际执行 MySQL DDL。`REAL_MYSQL_DAY2_E2E=NOT_RUN`；需由用户启动连接 MySQL 的新 JAR 并运行 day2-e2e.ps1。

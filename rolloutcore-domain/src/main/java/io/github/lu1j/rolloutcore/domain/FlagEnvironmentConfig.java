@@ -10,6 +10,7 @@ public class FlagEnvironmentConfig {
     private boolean enabled;
     private Long defaultVariantId;
     private long version;
+    private String evaluationPolicyJson;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -30,6 +31,9 @@ public class FlagEnvironmentConfig {
 
     public long getVersion() { return version; }
     public void setVersion(long version) { this.version = version; }
+
+    public String getEvaluationPolicyJson() { return evaluationPolicyJson; }
+    public void setEvaluationPolicyJson(String evaluationPolicyJson) { this.evaluationPolicyJson = evaluationPolicyJson; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
