@@ -25,7 +25,7 @@ class ApplicationWiringTest {
             .withUserConfiguration(RolloutCoreApplication.class)
             .withBean(DataSource.class, () -> mock(DataSource.class))
             .withPropertyValues("spring.flyway.enabled=false", "management.health.db.enabled=false",
-                    "ROLLOUTCORE_DB_PASSWORD=test-only");
+                    "ROLLOUTCORE_DB_PASSWORD=test-only", "rolloutcore.outbox.enabled=false");
 
     @Test void healthIsExposed() throws Exception {
         runner.run(context -> {

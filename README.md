@@ -1,6 +1,6 @@
 # RolloutCore
 
-RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1 实现 Control Plane：管理项目、环境、Flag 定义、类型化 Variant、环境配置和审计。Day2 在现有模块化单体上增加可解释、确定性的 Evaluation Engine、规则匹配和百分比分流；客户端分发尚未实现。
+RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1 实现 Control Plane；Day2 增加确定性 Evaluation Engine；Day3 增加 Caffeine L1、可选 Redis L2、配置快照缓存和故障兜底。仍为模块化单体，客户端分发尚未实现。
 
 ## Day1 能力
 
@@ -12,7 +12,7 @@ RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1 实�
 - 仅开放 Actuator health。
 - 默认测试不依赖外部 MySQL，不使用 H2 或 Docker。
 
-Control Plane 负责配置写入和管理；Day2 的 EvaluationService 负责请求中的 Flag 求值，直接读 MySQL。Kill Switch 关闭时返回配置的 defaultVariant，reason=DISABLED；不意味着 value 一定为 false，也不代表已有 SDK 或推送机制。
+Control Plane 负责配置写入和管理；EvaluationService 从配置快照求值，缓存 miss 时由 SnapshotRepository 读取 MySQL。Kill Switch 关闭时返回配置的 defaultVariant，reason=DISABLED；不意味着 value 一定为 false，也不代表已有 SDK 或推送机制。
 
 ## 模块
 
@@ -191,16 +191,62 @@ mvn clean verify
 powershell -ExecutionPolicy Bypass -File scripts/day2-e2e.ps1
 ```
 
-Day2 真实数据库验证状态：`REAL_MYSQL_DAY2_E2E=NOT_RUN`，当前执行环境未提供数据库密码。自动测试不能代替真实 V2 迁移和 HTTP 持久化验证。详见 [Day2 报告](docs/DAY2_REPORT.md)。
+Day2 真实数据库验证状态：用户已确认 `REAL_MYSQL_DAY2_E2E=PASSED`，包括真实 V1/V2、规则匹配、稳定分流、stale 409 和审计。历史实现记录见 [Day2 报告](docs/DAY2_REPORT.md)。
 
 Day2 最终自动验证：235 项测试全部通过（Day1 129 + Day2 106），`mvn clean verify` 成功；固定 5 万用户的 10% rollout 命中率为 10.122%。
 
-## Known Limitations / Day3 准备
+## Day3 配置快照缓存
+
+缓存键为 `(projectKey, environmentKey, flagKey)`，不包含 userId，不缓存最终求值结果。
+不可变 EvaluationSnapshot 包含版本、开关、默认 Variant、已解析 policy 和不可变 Variant Map；每次请求继续执行 Day2 规则和 Stable Hash。
+
+读路径：`L1 → L2（可选）→ MySQL → 回填 L2/L1`。L1 命中无网络、无数据库连接和事务；仅 DB miss 在 SnapshotRepository 开启 REPEATABLE_READ。
+同 JVM 同 key 的并发 miss 共享一个加载结果；真实 Not Found 短暂负缓存。Redis 失败降级到 DB，写 Redis 失败不影响正常求值。
+DB 基础设施故障时才允许使用有期限的 LKG；真实 Not Found、校验或数据错误不回退。
+
+所有 Config create/update/enable/disable/policy 更新在事务提交后执行失效：清理本实例 L1、negative、LKG，并更新 Redis 版本栅栏。
+本地 generation 和 version 防止旧加载回填；刚修改过的 key 不会回退到旧 LKG。Redis 原子脚本只用于缓存版本比较，不用于执行规则 DSL，不是分布式锁。
+
+| 配置 | 默认值 | 环境变量 |
+| --- | --- | --- |
+| redis-enabled | false | ROLLOUTCORE_CACHE_REDIS_ENABLED |
+| l1-ttl | 10s | ROLLOUTCORE_CACHE_L1_TTL |
+| l1-maximum-size | 10000 | ROLLOUTCORE_CACHE_L1_MAXIMUM_SIZE |
+| l2-ttl | 60s | ROLLOUTCORE_CACHE_L2_TTL |
+| negative-ttl | 2s | ROLLOUTCORE_CACHE_NEGATIVE_TTL |
+| lkg-ttl | 5m | ROLLOUTCORE_CACHE_LKG_TTL |
+| lkg-maximum-size | 10000 | ROLLOUTCORE_CACHE_LKG_MAXIMUM_SIZE |
+| Redis host / port | localhost / 6379 | ROLLOUTCORE_REDIS_HOST / ROLLOUTCORE_REDIS_PORT |
+| Redis password | 空 | ROLLOUTCORE_REDIS_PASSWORD |
+| Redis connect / command timeout | 200ms / 200ms | ROLLOUTCORE_REDIS_CONNECT_TIMEOUT / ROLLOUTCORE_REDIS_TIMEOUT |
+
+这是开发默认值，可通过环境变量覆盖，不代表生产最优参数。negative cache 和版本水位的 maximumSize 使用 l1-maximum-size；版本水位 TTL 为 lkg-ttl+l2-ttl。
+L1/LKG 各 JVM 独立，不跨实例共享。Redis key 为 `rolloutcore:eval:v1:{projectKey}:{environmentKey}:{flagKey}`，Redis Hash 存储版本及 JSON payload，禁止 Java 原生序列化。
+本 JVM 每次配置失效还会让该 key 所在的 256 个固定 stripe 之一暂时绕过 L2，持续一个 l2-ttl，防止 Redis 删除失败或水位被容量淘汰后重新读入旧值；其他同 stripe 的 miss 可能额外读 DB。
+
+Micrometer 注册 `rolloutcore.cache.*` 计数器和 Caffeine stats，不带 userId/projectKey/flagKey 标签。公共 Evaluation 响应不增加缓存调试字段。
+Actuator 默认仍仅开放 health；Redis 是可选优化层，Redis health contributor 关闭，避免 Redis 故障把可用的 L1/DB 模式标为不可用。Redis 错误通过 metric/log 观察。
+
+```powershell
+# 启动连接真实 MySQL 的 Day3 JAR 后；默认 redis-enabled=false 即 L1+DB。
+powershell -ExecutionPolicy Bypass -File scripts/day3-e2e.ps1
+# 服务端显式启用 Redis 后，可提供已安装 redis-cli 和实际地址验证 L2 JSON/version/TTL。
+# 密码由调用者安全设置 REDISCLI_AUTH，不写入命令行。
+powershell -ExecutionPolicy Bypass -File scripts/day3-e2e.ps1 -RedisEnabled -RedisCliPath '<redis-cli路径>' -RedisHost '<实际地址>' -RedisPort <实际端口>
+```
+
+脚本默认唯一 ProjectKey，不清理数据、不管理系统服务。当前 Codex 环境未提供 DB 密码或实际 Redis 配置：`REAL_MYSQL_DAY3_E2E=NOT_RUN`、`REAL_REDIS_DAY3_E2E=NOT_RUN`。
+无需 Day3 schema 变化，未新增 V3，V1/V2 保持原样。详见 [Day3 报告](docs/DAY3_REPORT.md)。
+
+Day3 自动验证：284 项测试全部通过（保留 235 + 新增 49），`mvn clean verify` 成功；真实 Redis/MySQL Day3 E2E 仍待实际环境执行。
+
+## Known Limitations / Day4 准备
 
 - 没有鉴权、租户权限、归档 API、删除 API、Variant 修改 API。
 - status 已建模，Day1 只创建 ACTIVE；尚无资源生命周期工作流。
-- Evaluation 仍直接读 MySQL；没有缓存或传播延迟保证，Day3 再优化 Data Plane latency/cache。
-- 没有 Redis、Caffeine、Kafka、Outbox、SDK 本地求值、OpenFeature、Docker、Prometheus 或压测。
+- 无 Kafka；多实例 L1 依靠 TTL 和各自的本地 after-commit 失效，不能立即感知其他 JVM 写入。Redis 失效失败时旧共享值也可能存活至 TTL。
+- single-flight 仅在单 JVM；LKG 是限时可用性兜底，不是强一致，其他实例未知的 Kill Switch 更新仍受陈旧窗口影响。
+- 无 Outbox、SDK 本地求值、OpenFeature、Docker、Prometheus exporter 或完整生产压测；真实 Day3 Redis 集成待验证。
 - 审计与业务共享数据库事务，没有外部投递或不可篡改保证；分页使用 offset。
 - 项目与环境的归属由 Service 和 scoped 查询保障；数据库外键保证资源存在，Variant 归属另有复合外键。绕过 Service 直接写库不属于支持的写入方式。
 - 默认自动测试不依赖 MySQL；真实 V1、HTTP 持久化与回滚已另行验证，实际并发竞争和 JSON/外键完整边界未穷尽验证。

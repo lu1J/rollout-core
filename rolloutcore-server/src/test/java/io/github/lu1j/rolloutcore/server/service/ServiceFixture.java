@@ -16,6 +16,7 @@ abstract class ServiceFixture {
     protected FlagVariantMapper variants;
     protected FlagEnvironmentConfigMapper configs;
     protected AuditLogMapper audits;
+    protected OutboxEventMapper outbox;
     protected ControlPlaneService service;
     protected JsonMapper json;
     protected Project project;
@@ -23,6 +24,7 @@ abstract class ServiceFixture {
     protected FeatureFlag flag;
     protected FlagVariant variant;
     protected FlagEnvironmentConfig config;
+    protected org.springframework.context.ApplicationEventPublisher events;
     private ValidatorFactory validatorFactory;
 
     @BeforeEach
@@ -33,10 +35,13 @@ abstract class ServiceFixture {
         variants = mock(FlagVariantMapper.class);
         configs = mock(FlagEnvironmentConfigMapper.class);
         audits = mock(AuditLogMapper.class);
+        outbox = mock(OutboxEventMapper.class);
+        when(outbox.insert(any())).thenReturn(1);
         json = JsonMapper.builder().build();
         validatorFactory = Validation.buildDefaultValidatorFactory();
+        events = mock(org.springframework.context.ApplicationEventPublisher.class);
         service = new ControlPlaneService(projects, environments, flags, variants, configs, audits,
-                new InputRules(validatorFactory.getValidator()), json);
+                new InputRules(validatorFactory.getValidator()), json, events, outbox);
         project = new Project();
         project.setId(1L); project.setProjectKey("shop"); project.setName("Shop");
         environment = new Environment();

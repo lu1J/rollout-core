@@ -8,11 +8,36 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  data:
+    redis:
+      host: ${ROLLOUTCORE_REDIS_HOST:localhost}
+      port: ${ROLLOUTCORE_REDIS_PORT:6379}
+      password: ${ROLLOUTCORE_REDIS_PASSWORD:}
+      connect-timeout: ${ROLLOUTCORE_REDIS_CONNECT_TIMEOUT:200ms}
+      timeout: ${ROLLOUTCORE_REDIS_TIMEOUT:200ms}
+      repositories:
+        enabled: false
+rolloutcore:
+  outbox:
+    enabled: ${ROLLOUTCORE_OUTBOX_ENABLED:true}
+    poll-interval-ms: ${ROLLOUTCORE_OUTBOX_POLL_INTERVAL_MS:1000}
+    initial-delay-ms: ${ROLLOUTCORE_OUTBOX_INITIAL_DELAY_MS:1000}
+  cache:
+    redis-enabled: ${ROLLOUTCORE_CACHE_REDIS_ENABLED:false}
+    l1-ttl: ${ROLLOUTCORE_CACHE_L1_TTL:10s}
+    l1-maximum-size: ${ROLLOUTCORE_CACHE_L1_MAXIMUM_SIZE:10000}
+    l2-ttl: ${ROLLOUTCORE_CACHE_L2_TTL:60s}
+    negative-ttl: ${ROLLOUTCORE_CACHE_NEGATIVE_TTL:2s}
+    lkg-ttl: ${ROLLOUTCORE_CACHE_LKG_TTL:5m}
+    lkg-maximum-size: ${ROLLOUTCORE_CACHE_LKG_MAXIMUM_SIZE:10000}
 mybatis:
   mapper-locations: classpath:mapper/*.xml
   configuration:
     map-underscore-to-camel-case: true
 management:
+  health:
+    redis:
+      enabled: false
   endpoints:
     web:
       exposure:

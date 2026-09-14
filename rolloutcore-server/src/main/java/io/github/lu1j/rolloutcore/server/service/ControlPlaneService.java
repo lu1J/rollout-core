@@ -16,6 +16,9 @@ import java.util.stream.Collectors;
 import io.github.lu1j.rolloutcore.server.evaluation.EvaluationPolicy;
 import io.github.lu1j.rolloutcore.server.evaluation.EvaluationPolicyValidator;
 import io.github.lu1j.rolloutcore.server.evaluation.EvaluationCommands.*;
+import io.github.lu1j.rolloutcore.server.cache.CacheKey;
+import io.github.lu1j.rolloutcore.server.cache.ConfigChanged;
+import org.springframework.context.ApplicationEventPublisher;
 
 @Service
 @Transactional(readOnly = true)
@@ -28,10 +31,12 @@ public class ControlPlaneService {
     private final AuditLogMapper audits;
     private final InputRules rules;
     private final ObjectMapper json;
+    private final ApplicationEventPublisher events;
+    private final OutboxEventMapper outbox;
 
     public ControlPlaneService(ProjectMapper projects, EnvironmentMapper environments,
             FeatureFlagMapper flags, FlagVariantMapper variants, FlagEnvironmentConfigMapper configs,
-            AuditLogMapper audits, InputRules rules, ObjectMapper json) {
+            AuditLogMapper audits, InputRules rules, ObjectMapper json, ApplicationEventPublisher events, OutboxEventMapper outbox) {
         this.projects = projects;
         this.environments = environments;
         this.flags = flags;
@@ -40,6 +45,8 @@ public class ControlPlaneService {
         this.audits = audits;
         this.rules = rules;
         this.json = json;
+        this.events = events;
+        this.outbox = outbox;
     }
 
     @Transactional
@@ -152,6 +159,7 @@ public class ControlPlaneService {
         configs.insert(config);
         audit(scope.projectId(), config.getEnvironmentId(), config.getFlagId(), operator,
                 "CONFIG_CREATED", null, config);
+        configurationChanged(scope.key(), config.getVersion());
         return config;
     }
 
@@ -205,6 +213,7 @@ public class ControlPlaneService {
         persist(current, command.expectedVersion(), true);
         auditJson(scope.projectId(), current.getEnvironmentId(), current.getFlagId(), operator,
                 "EVALUATION_POLICY_UPDATED", before, policySnapshot(current));
+        configurationChanged(scope.key(), current.getVersion());
         return new PolicyResponse(current.getVersion(), policy);
     }
 
@@ -225,7 +234,25 @@ public class ControlPlaneService {
         persist(current, expectedVersion, false);
         auditJson(scope.projectId(), current.getEnvironmentId(), current.getFlagId(), operator,
                 operation, before, json.writeValueAsString(current));
+        configurationChanged(scope.key(), current.getVersion());
         return current;
+    }
+
+    private void configurationChanged(CacheKey key, long version) {
+        var change = new ConfigChanged(key, version);
+        var event = new OutboxEvent();
+        event.setEventId(java.util.UUID.randomUUID().toString());
+        event.setEventType("CONFIG_CHANGED");
+        event.setProjectKey(key.projectKey());
+        event.setEnvironmentKey(key.environmentKey());
+        event.setFlagKey(key.flagKey());
+        event.setVersion(version);
+        event.setPayload(json.writeValueAsString(change));
+        event.setStatus(OutboxStatus.PENDING);
+        event.setCreatedAt(now());
+        event.setUpdatedAt(event.getCreatedAt());
+        if (outbox.insert(event) != 1) throw new IllegalStateException("Outbox insert failed");
+        events.publishEvent(change);
     }
 
     private static void checkVersion(FlagEnvironmentConfig current, long expectedVersion) {
@@ -266,7 +293,7 @@ public class ControlPlaneService {
         if (environment == null || !Objects.equals(environment.getProjectId(), project.getId())) {
             throw BusinessException.notFound("Environment");
         }
-        return new Scope(project.getId(), environment, flag(project.getId(), flagKey));
+        return new Scope(project.getId(), environment, flag(project.getId(), flagKey), new CacheKey(projectKey, envKey, flagKey));
     }
 
     private FlagVariant variant(long flagId, String variantKey) {
@@ -305,5 +332,5 @@ public class ControlPlaneService {
     }
 
     private static LocalDateTime now() { return LocalDateTime.now(ZoneOffset.UTC); }
-    private record Scope(Long projectId, Environment environment, FeatureFlag flag) {}
+    private record Scope(Long projectId, Environment environment, FeatureFlag flag, CacheKey key) {}
 }

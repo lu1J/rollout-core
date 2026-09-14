@@ -20,17 +20,25 @@ class Day2ServiceTest extends ServiceFixture {
     private ValidatorFactory factory;
     private StableBucketService buckets;
     private FlagVariant newVariant;
+    private io.github.lu1j.rolloutcore.server.cache.SnapshotRepository repository;
 
     @BeforeEach void evaluationFixture() {
         factory = Validation.buildDefaultValidatorFactory();
         buckets = spy(new StableBucketService());
-        evaluation = new EvaluationService(service, new InputRules(factory.getValidator()), new RuleEngine(), buckets, json);
+        repository = new io.github.lu1j.rolloutcore.server.cache.SnapshotRepository(service, json);
+        evaluation = evaluationUsing(repository);
         newVariant = new FlagVariant();
         newVariant.setId(6L); newVariant.setFlagId(3L); newVariant.setVariantKey("new"); newVariant.setValueJson("true");
         when(variants.listByFlag(3)).thenReturn(List.of(variant, newVariant));
         when(configs.updatePolicy(any(), anyLong())).thenReturn(1);
     }
     @AfterEach void close() { factory.close(); }
+
+    private EvaluationService evaluationUsing(io.github.lu1j.rolloutcore.server.cache.SnapshotRepository source) {
+        return new EvaluationService(key -> new io.github.lu1j.rolloutcore.server.cache.SnapshotProvider.LoadResult(
+                source.load(key), io.github.lu1j.rolloutcore.server.cache.SnapshotProvider.Source.DB),
+                new InputRules(factory.getValidator()), new RuleEngine(), buckets, json);
+    }
 
     private EvaluateRequest request(String country) {
         return new EvaluateRequest("shop", "prod", "pay", new EvaluationContext("user-123", country, new BigDecimal("5"), "2.3.1", null));
@@ -155,7 +163,8 @@ class Day2ServiceTest extends ServiceFixture {
         interceptor.setTransactionManager(new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
         interceptor.setTransactionAttributeSource(new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource());
         interceptor.afterPropertiesSet();
-        var proxy = new org.springframework.aop.framework.ProxyFactory(evaluation); proxy.addAdvice(interceptor);
+        // The same transaction assertions now target the DB-only loader; cache hits need no transaction.
+        var proxy = new org.springframework.aop.framework.ProxyFactory(repository); proxy.addAdvice(interceptor);
         when(configs.find(3, 2)).thenAnswer(inv -> {
             assertTrue(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
             assertTrue(org.springframework.transaction.support.TransactionSynchronizationManager.isCurrentTransactionReadOnly());
@@ -165,7 +174,7 @@ class Day2ServiceTest extends ServiceFixture {
             assertSame(connection, org.springframework.jdbc.datasource.DataSourceUtils.getConnection(dataSource));
             return List.of(variant, newVariant);
         });
-        ((EvaluationService) proxy.getProxy()).evaluate(request("US"));
+        evaluationUsing((io.github.lu1j.rolloutcore.server.cache.SnapshotRepository) proxy.getProxy()).evaluate(request("US"));
         verify(connection).setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);
         verify(connection).commit(); verify(connection).close(); verifyNoInteractions(audits);
     }

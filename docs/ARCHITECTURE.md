@@ -1,4 +1,4 @@
-# RolloutCore 架构（Day1 + Day2）
+# RolloutCore 架构（Day1 + Day2 + Day3）
 
 ## 分层与模块边界
 
@@ -113,8 +113,8 @@ initial variants 重复 key 在首次写入前返回 validation_error，数据�
 ## Day2 求值与策略写入
 
 ```text
-EvaluationController → EvaluationService（只读 REPEATABLE_READ 事务）
-                         ├─ ControlPlaneService → 原有 scoped Mapper → MySQL
+EvaluationController → EvaluationService
+                         ├─ SnapshotProvider → SnapshotCache → SnapshotRepository（DB miss 的 REPEATABLE_READ）
                          ├─ RuleEngine → priority 排序、ALL/ANY、类型安全匹配
                          └─ StableBucketService → 固定 SHA-256 bucket
 ControlPlaneController → ControlPlaneService.updatePolicy（写事务）
@@ -135,11 +135,54 @@ Rule 按 priority 从小到大排序，首个满足即停止；ALL 所有条件�
 IN/NOT_IN 要求非空同类型标量数组；字符串比较大小写敏感，CONTAINS 为字面子串。
 appVersion 只支持 EQ/NEQ/IN/NOT_IN，不支持 SemVer range。
 
-求值 public 方法使用 REPEATABLE_READ，让多次 scoped 查询在同一个 MySQL 快照读取配置和 Variants。
-目前复用 ControlPlaneService 的读接口，会重复读取 Project/Flag；这是 Day2 的简单读路径，Day3 再优化 latency/cache。
+Day3 将 REPEATABLE_READ 移到 SnapshotRepository.load，让 DB miss 的多次 scoped 查询仍读取一致快照。
+缓存命中不再调用 ControlPlaneService 或创建数据库事务；DB miss 仍复用现有 scoped 读接口。
 求值无写入、不产生成功 Audit，响应只暴露 Variant value、原因、版本、命中 priority 或 bucket。
 
 policy 写入与 Day1 写入共用 checkVersion/persist，SQL 分别只写 policy 或 enabled/defaultVariant。
 两种 SQL 都使用同一行的 `WHERE id=? AND version=?` 和数据库原子 `version=version+1`。
 业务校验、旧快照、条件更新、新快照和 EVALUATION_POLICY_UPDATED 在一个写事务内；审计失败回滚。
-完整策略 JSON 便于未来作为缓存快照消费；当前没有缓存、SDK、消息推送或微服务拆分。
+完整策略进入 Day3 配置快照；当前没有 SDK、消息推送或微服务拆分。
+
+## Day3 Cache Aside
+
+```text
+EvaluationService → SnapshotCache.get(project, env, flag)
+  ├─ L1 Caffeine hit → immutable snapshot
+  ├─ negative hit → resource_not_found
+  └─ per-key single-flight
+       ├─ L2 Redis JSON hit → decode/validate → L1 + LKG
+       └─ L2 miss/error/disabled → SnapshotRepository.load
+              ├─ DB success → best-effort L2 → L1 + LKG
+              ├─ confirmed Not Found → short negative cache，清除 LKG
+              └─ infrastructure failure → bounded LKG 或原异常
+snapshot → 原 RuleEngine / StableBucketService → 最终 Variant
+```
+
+EvaluationSnapshot 是不可变对象：CacheKey、configVersion、enabled、defaultVariantKey、已解析策略和 immutable Map。
+Variant value 是递归不可变 Map/List/String/Boolean/BigDecimal/null 图；policy 向内和向外都深拷贝，防止 JsonNode 被调用者修改。
+最终响应仍按 Day2 的 JsonNode 数值语义构造。没有 userId cache key，也没有缓存最终 EvaluationResponse。
+
+ConfigChanged(key, latestVersion) 在成功写入及 Audit 后发布，SnapshotCache 用 AFTER_COMMIT 同步监听。
+事务回滚不触发失效。create Config、普通 update、enable、disable、policy update 全覆盖。
+新增 Variant 无需失效：现有策略无法引用尚未存在的 Variant，新增后也不会自动改变选择；后续引用它的配置写入会消费 version 并失效。
+
+每个 JVM 使用 256 个固定 stripe 锁和 generation，只有短小的缓存操作、回填及有短 timeout 的 Redis 写入在锁内；DB 加载在锁外。
+miss 开始捕获 generation；提交事件递增 generation，设置 minimumVersion，清除 L1/negative/LKG。旧加载不允许回填，最多重试 3 次，持续冲突则失败。
+版本水位是 bounded Caffeine（TTL=lkgTTL+l2TTL，容量=l1MaximumSize）。为避免水位容量淘汰或 Redis 删除失败导致旧共享值重新进入本 JVM，
+提交事件让该 stripe 在一个 l2TTL 内绕过 Redis 读取；Redis fill 的 TTL 扣除本次加载耗时，超时加载不写 L2。
+该保守策略会增加同 stripe 的 DB miss，保留了固定大小锁数组和有限水位存储，无永久增长的 key map。
+
+Redis Hash 保存 version 和 JSON payload。Lua 使用十进制字符串长度/字典序比较版本，避免大于 2^53 时的精度损失。
+更新失效保留有 TTL 的版本 tombstone；旧版本 fill 不能覆盖更新的 payload 或 tombstone。Lua 操作是单 key 原子的，不是分布式锁。
+Redis hit 的解析或结构验证错误按缓存故障回退；Redis get/put/invalidate 异常仅记录指标和固定内容日志。
+
+LKG 只用于 DataAccessResourceFailureException、TransientDataAccessException、CannotCreateTransactionException 等基础设施故障。
+不对普通业务异常、真正 Not Found、数据完整性错误回退；fallback 不重新填 L1，也不刷新 LKG TTL。
+本实例已知写入后清除旧 LKG，宁可该 key 在 DB 故障时失败，也不回退到旧 enabled=true。
+无 Kafka 时不能对未知的跨实例 Kill Switch 更新做同等保证；多实例缓存及 LKG 都不是强一致。
+
+默认 L1=10s/10000，L2=60s，negative=2s/10000，LKG=5m/10000；全部通过 CacheProperties/application.yml 配置。
+Micrometer 计数器覆盖 hit/miss/error/db_load/negative/singleflight/LKG/invalidation/stale-fill；Caffeine recordStats 提供容量和命中基础指标。
+默认不增加 Actuator 暴露面；不添加高基数资源或用户 tag。依赖版本由 Spring Boot BOM 管理。
+Day4 可消费 config-change event 调用同一失效逻辑以主动清理其他 JVM 的 L1；Day3 不实现 Kafka、Outbox 或跨 JVM single-flight。
