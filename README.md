@@ -1,6 +1,152 @@
 # RolloutCore
 
-RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1 实现 Control Plane；Day2 增加确定性 Evaluation Engine；Day3 增加 Caffeine L1、可选 Redis L2、配置快照缓存和故障兜底。仍为模块化单体，客户端分发尚未实现。
+RolloutCore 是一个学习型 Feature Flag 与渐进式发布平台。Day1–Day4 提供配置管理、确定性求值、快照缓存与 Outbox；Day5 增加 HTTP Java SDK、Spring Boot Starter、OpenFeature Provider 和独立业务 Demo。Server 保持模块化单体，业务应用通过 HTTP 接入。
+
+## Day5 业务接入
+
+```text
+Business Service → Starter 注入 RolloutCoreClient → Java HttpClient
+                                                   ↓ POST /api/v1/evaluate
+                                             rolloutcore-server
+OpenFeature Client → RolloutCoreProvider → 同一个 RolloutCoreClient
+```
+
+业务项目依赖 `io.github.lu1j:rolloutcore-spring-boot-starter:0.1.0-SNAPSHOT`，配置：
+
+```yaml
+rolloutcore:
+  sdk:
+    enabled: true
+    base-url: http://127.0.0.1:8080
+    connect-timeout: 200ms
+    timeout: 500ms
+    max-retries: 1
+    retry-delay: 25ms
+    lkg-ttl: 30s
+    lkg-capacity: 1000
+```
+
+构造器注入 `RolloutCoreClient` 后调用：
+
+```java
+var result = client.booleanFlag("checkout-service", "prod", "new-payment-flow",
+        new io.github.lu1j.rolloutcore.sdk.EvaluationContext("user-123"), false);
+boolean useNewPayment = result.value();
+// source(): REMOTE / LKG / DEFAULT；error() 保留故障。
+```
+
+普通 Java 项目仅依赖 `rolloutcore-sdk`，通过
+`RolloutCoreClient.create(ClientOptions.defaults("http://127.0.0.1:8080"))` 创建共享客户端，退出时 close。
+SDK 支持 boolean、String、BigDecimal、Jackson 3 JsonNode（object/array）及统一 `evaluate`，
+不依赖 server/domain，不下载配置或执行规则。
+重试仅针对连接/超时及 502/503/504，默认最多额外一次；4xx、类型和协议错误不使用 LKG。
+现有 500 响应无法证明故障是瞬时基础设施错误，因此保守地不重试、不用 LKG。
+LKG 按完整上下文隔离，有 TTL/容量边界；过期或未命中时返回调用方默认值。
+
+使用 OpenFeature 时另加 `rolloutcore-openfeature-provider`：
+
+```java
+var api = dev.openfeature.sdk.OpenFeatureAPI.getInstance();
+api.setProviderAndWait("payment",
+        new io.github.lu1j.rolloutcore.openfeature.RolloutCoreProvider(client, "checkout-service", "prod"));
+boolean enabled = api.getClient("payment").getBooleanValue("new-payment-flow", false,
+        new dev.openfeature.sdk.ImmutableContext("user-123"));
+```
+
+Provider 是标准适配层，不是新的 Evaluation Engine。targetingKey 映射为 userId；
+LKG 映射 CACHED，原错误保存在 `rolloutcore.error/errorMessage` metadata。
+固定 OpenFeature 1.20.2，发布 POM/JAR 的 Java 11 target 已实际核对，并通过 Java 21 / Boot 4.1.1 构建测试。
+
+### 独立 Demo 与真实 E2E
+
+先执行 `mvn clean verify`。终端 A 按下方“本地运行”设置真实 MySQL 凭据并启动 server：
+
+```powershell
+java '-Djava.io.tmpdir=workspace' -jar rolloutcore-server/target/rolloutcore-server-0.1.0-SNAPSHOT.jar
+```
+
+终端 B 启动独立业务应用（不需要数据库凭据）：
+
+```powershell
+$env:DEMO_PROJECT_KEY = 'day5-demo'
+$env:ROLLOUTCORE_SDK_BASE_URL = 'http://127.0.0.1:8080'
+java -jar rolloutcore-demo-service/target/rolloutcore-demo-service-0.1.0-SNAPSHOT.jar
+# GET http://127.0.0.1:8081/demo/payment?userId=day5-new
+```
+
+终端 C 创建真实 flag 并验证 old/new：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/day5-e2e.ps1 -ProjectKey day5-demo
+```
+
+重跑请换新的 ProjectKey，并同步修改 Demo 的 DEMO_PROJECT_KEY 后重启 Demo。
+脚本遇到已有项目会报错，不覆盖原数据、不管理服务、不清空 Redis。
+可选故障验证：Demo 启动时加 `--rolloutcore.sdk.lkg-ttl=5m`，正常脚本通过后手动停止 server 应用，
+保持 Demo 存活，在五分钟内运行同一脚本加 `-VerifyOutage`，检查热用户 LKG 和冷用户默认值。
+这会刻意扩大测试环境陈旧窗口，不是生产配置建议。
+
+用户已确认 Day5 真实 MySQL 8.0、Flyway V2/V3、`REAL_MYSQL_DAY5_E2E=PASSED`
+及 `REAL_DAY5_OUTAGE_E2E=PASSED`。这是用户执行的结果；自动测试仍使用本地 HTTP fixture。
+详见 [Day5 报告](docs/DAY5_REPORT.md)。以下 Day1–Day3 数据库验证记录是历史结果。
+
+## Kafka 事件传播（Day4 后补）
+
+已增加真实 Kafka Producer/Listener 适配器；由 Boot 4.1.1 管理
+Spring Kafka 4.1.1 / kafka-clients 4.2.1，版本来自实际 Maven 依赖树。
+
+```text
+配置 + Audit + Outbox PENDING（同一 MySQL 事务）
+  → COMMIT → Relay → KafkaTemplate → Broker ack → Outbox SENT
+Broker → 每实例独立 group → Listener → ConfigChangedConsumer → 本地 SnapshotCache 失效
+```
+
+默认仍为 `rolloutcore.events.transport=logging`，适合不运行 Broker 的开发环境；
+LoggingProducer 只记录日志，SENT 不代表跨进程投递。启用 Kafka：
+
+```yaml
+spring:
+  kafka:
+    bootstrap-servers: 127.0.0.1:9092
+rolloutcore:
+  events:
+    transport: kafka
+    instance-id: instance-a
+    topic: rolloutcore.config-events
+    send-timeout: 5s
+    consumer-retries: 2
+    consumer-retry-delay: 250ms
+```
+
+每个缓存实例必须有唯一、稳定的 instance-id，Kafka 模式缺失时启动失败。
+实例 A/B 分别使用 `rolloutcore-cache-instance-a` / `rolloutcore-cache-instance-b`。
+**相同 group 是负载均衡，不同 group 才是独立订阅**；不得让两个独立 L1 共用 group。
+Producer 的 acks=all/idempotence 不能消除 Broker 已收但 MySQL 未标 SENT 的重复窗口。
+消费者使用版本语义幂等：低版本忽略，同版本保守再次失效，不写业务配置。
+消费使用 RECORD ack、关闭自动提交；本地处理默认额外重试两次，耗尽/协议无效停止 listener，
+失败记录不提交，修复后重启重放；未引入 DLT 或 processed_event 表。
+
+开发 KRaft 配置：[infra/kafka-compose.yml](infra/kafka-compose.yml)，仅 Kafka，端口 127.0.0.1:9092。
+有可用 Docker/MySQL CLI、已设置实际数据库环境变量且 8080/8082 空闲时：
+
+```powershell
+mvn clean verify
+powershell -ExecutionPolicy Bypass -File scripts/kafka-e2e.ps1 -MySqlClient '<mysql.exe实际路径>' -RunOutageExperiment
+```
+
+脚本启动两个独立 server JVM，保存 Broker 记录、两个 group、两份进程日志和 PENDING/SENT 证据，
+使用 10 分钟 L1 TTL 排除自然过期，验证重复、乱序及可选 Broker 停机恢复。
+它不清空数据、不删除 volume、不停止 Java/Windows 服务；完成后两个 server 保留运行并输出 PID。
+运行前若旧 JAR 正被占用，请自行停止对应应用；不要强杀或删除被锁文件。
+**Windows 原生 Kafka 4.2.1 手工 E2E 已通过**：真实 CLI smoke、
+`REAL_KAFKA_CROSS_JVM_INVALIDATION=PASSED`、`REAL_KAFKA_OUTAGE_RECOVERY=PASSED`。
+A/B 独立 group 收到同一事件，B 在约 89.5s 内从 v0 收敛到 v1，早于 600s L1 TTL；
+Broker 停机时配置 PUT v2 成功、B 暂读 v1，恢复后 Relay 自动重试、两实例消费并收敛到 v2。
+恢复后的最终 SENT **未通过真实 SQL 直接查询**：mysql.exe 因 Windows DLL/runtime 问题无法启动；
+ACK/markSent 的行为另有自动测试，不能将 ACK 日志当成 SQL 提交证据。
+**Docker Compose E2E=NOT_RUN**，Docker 仍未安装/运行，以上脚本保留为 Docker 自动化路径。
+日志行号、Windows `java -cp ".\libs\*" <MainClass>` workaround 和完整边界见
+[KAFKA_E2E_REPORT](docs/KAFKA_E2E_REPORT.md)。
 
 ## Day1 能力
 
@@ -20,10 +166,10 @@ Control Plane 负责配置写入和管理；EvaluationService 从配置快照求
 | --- | --- |
 | rolloutcore-domain | 六个领域对象、FlagValueType、ResourceStatus；不依赖 server 或 Spring |
 | rolloutcore-server | Spring Boot HTTP API、Service、MyBatis、Flyway、测试 |
-| rolloutcore-sdk | 可构建空骨架 |
-| rolloutcore-spring-boot-starter | 可构建空骨架 |
-| rolloutcore-openfeature-provider | 可构建空骨架 |
-| rolloutcore-demo-service | 可构建空骨架 |
+| rolloutcore-sdk | 独立 HTTP SDK、类型校验、有限重试和 LKG |
+| rolloutcore-spring-boot-starter | 配置绑定、自动注入、用户 Bean 覆盖 |
+| rolloutcore-openfeature-provider | OpenFeature 类型/context/reason/error 适配 |
+| rolloutcore-demo-service | 独立 Spring Boot 业务应用，GET /demo/payment |
 
 调用链：Controller → ControlPlaneService → Mapper 接口 → XML SQL → MySQL。
 没有 JPA / Hibernate ORM、MyBatis-Plus 或 Lombok。依赖中的 Hibernate Validator 是 Jakarta Validation 实现，不是 Hibernate ORM。
@@ -40,7 +186,7 @@ mvn clean verify
 根 POM 使用 Spring Boot 4.1.1，MyBatis Starter 固定 4.0.0，JUnit Jupiter 固定 5.14.4。
 Boot 当前默认管理 JUnit 6，因此显式覆盖 `junit-jupiter.version`；应用装配测试使用 Context Runner，避免依赖需要 JUnit 6 的 SpringExtension。
 
-`.mvn/maven.config` 将本地依赖缓存放在被忽略的 `workspace/maven-repository`，并使用仓库内的空 settings，从 Maven Central HTTPS 下载，不读取或更改用户 Maven 配置。首次构建需要联网，后续可以使用缓存。四个占位模块产生空 JAR 警告属于预期。
+`.mvn/maven.config` 将本地依赖缓存放在被忽略的 `workspace/maven-repository`，并使用仓库内的空 settings，从 Maven Central HTTPS 下载，不读取或更改用户 Maven 配置。首次构建需要联网，后续可以使用缓存。Day5 四个接入模块均已有实现。
 
 测试分为规则测试、mock Mapper 的业务测试、MockMvc、真实 Spring 事务代理配合 mock JDBC Connection 的事务边界测试、MyBatis XML 合约测试、应用上下文及 health 测试。mock JDBC 的 rollback 验证不等于已验证 MySQL 实际回滚。
 
@@ -240,13 +386,13 @@ powershell -ExecutionPolicy Bypass -File scripts/day3-e2e.ps1 -RedisEnabled -Red
 
 Day3 自动验证：284 项测试全部通过（保留 235 + 新增 49），`mvn clean verify` 成功；真实 Redis/MySQL Day3 E2E 仍待实际环境执行。
 
-## Known Limitations / Day4 准备
+## 当前限制
 
 - 没有鉴权、租户权限、归档 API、删除 API、Variant 修改 API。
 - status 已建模，Day1 只创建 ACTIVE；尚无资源生命周期工作流。
-- 无 Kafka；多实例 L1 依靠 TTL 和各自的本地 after-commit 失效，不能立即感知其他 JVM 写入。Redis 失效失败时旧共享值也可能存活至 TTL。
+- Kafka transport 已实现；默认 logging 模式仍仅依靠 TTL 和本地 after-commit。Kafka 异步传播有延迟，停机/订阅异常期间仍可能使用旧缓存；Redis 失效失败时旧共享值也可能存活至 TTL。
 - single-flight 仅在单 JVM；LKG 是限时可用性兜底，不是强一致，其他实例未知的 Kill Switch 更新仍受陈旧窗口影响。
-- 无 Outbox、SDK 本地求值、OpenFeature、Docker、Prometheus exporter 或完整生产压测；真实 Day3 Redis 集成待验证。
+- Day4 Outbox/Kafka 已通过 Windows 原生 Broker 双 JVM 失效及停机恢复验证；恢复后最终 SENT 尚无直接 SQL 查询证据，Docker E2E 未运行。LoggingProducer 仍只是日志。Day5 已有远端 SDK/OpenFeature；没有全栈容器化、SDK 本地求值、Prometheus exporter 或完整生产压测。
 - 审计与业务共享数据库事务，没有外部投递或不可篡改保证；分页使用 offset。
 - 项目与环境的归属由 Service 和 scoped 查询保障；数据库外键保证资源存在，Variant 归属另有复合外键。绕过 Service 直接写库不属于支持的写入方式。
 - 默认自动测试不依赖 MySQL；真实 V1、HTTP 持久化与回滚已另行验证，实际并发竞争和 JSON/外键完整边界未穷尽验证。

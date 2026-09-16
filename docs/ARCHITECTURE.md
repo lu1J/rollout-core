@@ -1,4 +1,4 @@
-# RolloutCore 架构（Day1 + Day2 + Day3）
+# RolloutCore 架构（Day1–Day5）
 
 ## 分层与模块边界
 
@@ -142,7 +142,7 @@ Day3 将 REPEATABLE_READ 移到 SnapshotRepository.load，让 DB miss 的多次 
 policy 写入与 Day1 写入共用 checkVersion/persist，SQL 分别只写 policy 或 enabled/defaultVariant。
 两种 SQL 都使用同一行的 `WHERE id=? AND version=?` 和数据库原子 `version=version+1`。
 业务校验、旧快照、条件更新、新快照和 EVALUATION_POLICY_UPDATED 在一个写事务内；审计失败回滚。
-完整策略进入 Day3 配置快照；当前没有 SDK、消息推送或微服务拆分。
+完整策略进入 Day3 配置快照；Day5 SDK 通过 HTTP 求值，不复制策略；没有真实消息推送或 server 微服务拆分。
 
 ## Day3 Cache Aside
 
@@ -186,3 +186,184 @@ LKG 只用于 DataAccessResourceFailureException、TransientDataAccessException�
 Micrometer 计数器覆盖 hit/miss/error/db_load/negative/singleflight/LKG/invalidation/stale-fill；Caffeine recordStats 提供容量和命中基础指标。
 默认不增加 Actuator 暴露面；不添加高基数资源或用户 tag。依赖版本由 Spring Boot BOM 管理。
 Day4 可消费 config-change event 调用同一失效逻辑以主动清理其他 JVM 的 L1；Day3 不实现 Kafka、Outbox 或跨 JVM single-flight。
+
+## Day4 与 Day5：写平面、读平面及业务接入
+
+| 边界 | 当前职责 | 工作负载 |
+| --- | --- | --- |
+| Control Plane | ControlPlaneController、ControlPlaneService、配置写入、校验、Audit、Outbox/Relay | 低频写，事务正确性和持久化优先 |
+| Evaluation Plane | EvaluationController/API、EvaluationService、Snapshot Cache、RuleEngine、StableBucketService | 高 QPS 读，低延迟；命中配置快照后不访问 DB |
+| Business Service | Demo 或业务自己的 Controller/Service、调用方默认值与业务分支 | 通过 SDK HTTP 请求 Evaluation Plane |
+
+当前 server 保持一个部署单元。已有 controller/service/cache/evaluation/event 包已经表达职责，
+Day5 没有迁移 server 源码、改动数据库或拆分进程。Outbox 与 Audit 在配置写事务内；
+LoggingProducer 仍只是日志传输占位，不是 Kafka。后补的 Kafka transport 已提供真实 Producer/Listener 代码，
+已在 Windows 原生 Kafka 4.2.1 单节点通过双 JVM 主动失效及 Broker outage/recovery 手工验证；
+Docker 路径未运行，恢复后最终 SENT 未通过真实 SQL 直接查询，不扩展为生产部署或 exactly-once 保证。
+
+这是自然的未来微服务边界：写操作关注事务、审计和低频变更，读操作关注独立扩容、缓存命中与请求延迟。
+若实际容量或部署需求推动拆分，EvaluationController、EvaluationService、SnapshotProvider/Cache/Repository、
+RuleEngine、StableBucketService 及只读存储适配应进入 Evaluation 服务；
+配置写 controller/service、Audit、Outbox/Relay 和写 mapper 留在 Control 服务。
+EvaluationPolicy 等共享协议/校验模型应先抽成稳定契约，避免 Evaluation 服务反向依赖整个 Control 服务。
+配置事件已有 Kafka transport 调用各实例 ConfigChangedConsumer，
+但未来拆分仍需完善版本演进、启动恢复和部署运维，不能仅改 Maven 模块名称。
+
+SDK 的 baseUrl 可以直接指向 Evaluation 服务或其负载均衡地址，业务 API 无需因此变化。
+今天没有无法用 baseUrl 解决的服务发现需求，因此没有引入 Nacos、Eureka、Spring Cloud 或 Kubernetes。
+
+### 模块依赖与调用链
+
+```text
+rolloutcore-server → rolloutcore-domain
+rolloutcore-sdk → Java 21 java.net.http + Jackson 3
+rolloutcore-spring-boot-starter → rolloutcore-sdk + Spring Boot autoconfigure
+rolloutcore-openfeature-provider → rolloutcore-sdk + OpenFeature SDK 1.20.2
+rolloutcore-demo-service → rolloutcore-spring-boot-starter + Spring Boot Web/Actuator
+
+Demo HTTP Controller → RolloutCoreClient.booleanFlag
+  → SDK-owned request DTO → POST {baseUrl}/api/v1/evaluate
+  → EvaluationController → EvaluationService → Snapshot/Rule/Stable Rollout
+  → JSON response → SDK type validation/result → Demo old/new business response
+
+OpenFeature Client → RolloutCoreProvider → same SDK HTTP/fallback implementation
+```
+
+SDK 不依赖 server、MyBatis Domain 或数据库。HTTP 请求字段沿用 projectKey/environmentKey/flagKey/context；
+响应使用 flagKey/variantKey/value/reason/configVersion，容忍额外字段以便演进。
+协议没有显式 valueType，SDK 按 JSON 节点严格判断 boolean/string/number/object-or-array；
+不把字符串数字转换成 NUMBER，也不把字符串 true 转换成 BOOLEAN。
+
+### SDK 故障策略与线程安全
+
+每次求值先访问远端，不在健康路径缓存结果。连接/传输失败、超时及 502/503/504 才允许有限重试，
+耗尽后选择有效 LKG，否则 caller default。4xx、类型错误、非瞬时/未分类 HTTP 状态及协议错误直接返回明确错误和 default；
+500 的现有 internal_error 无法区分基础设施和应用缺陷，因此不重试、不使用 LKG。
+中断保留线程中断标记，停止重试，不使用 LKG。TLS/明确 HTTP 协议异常不作为瞬时连接错误处理。
+
+每次尝试通过 sendAsync + 有期限的 future.get 包含响应体读取，超时/中断会取消交换；
+另有 HttpClient connect timeout。配置 maxRetries 是额外尝试次数，允许 0–5，
+retryDelay 为固定有界延迟（0–10s），没有无限重试。默认单次 500ms，额外一次、间隔 25ms；
+总等待上界近似为 attempts × timeout + retries × delay，加本地序列化和线程调度时间。
+
+LKG 是请求级的有限故障兜底，不是 Day3 低基数配置 Snapshot Cache。
+key 包含项目/环境/flag、完整序列化 context 和期望类型；调用方 default 不属于 key。
+默认 TTL=30s、容量=1000，容量 0 禁用；最多允许 100000 条。TTL 使用单调时钟，
+fallback 不刷新 TTL，不无限延寿；超期项在访问时剔除，容量淘汰采用同步 LRU。
+这是条目数量限制，非总字节预算；上下文字段顺序不同可能占据不同条目，但总容量仍有界。
+
+HttpClient/JsonMapper 可共享；LKG Map 及固定 64 个 generation 水位在同一短临界区保护，
+网络调用不持锁。观察到业务/协议错误时保守清除该 flag 所有上下文结果，
+generation 防止更早在途成功响应重新填入；相同 stripe 碰撞可能抑制其他 flag 的一次回填。
+同 key 的低版本响应不覆盖已存的高版本结果。JSON 输入/输出防御性复制。
+这些措施不构成跨进程一致性：SDK 不订阅配置事件，断网期间无法获知远端 Kill Switch，
+最多在 LKG TTL 范围内返回历史成功值。安全敏感业务可配置 lkg-capacity=0。
+
+### Starter 与 OpenFeature
+
+Boot 从 AutoConfiguration.imports 发现 RolloutCoreAutoConfiguration，绑定 rolloutcore.sdk，
+enabled 默认 true；false 不创建默认客户端；ConditionalOnMissingBean 允许业务自行提供客户端。
+Bean 销毁时 close，释放 HTTP 资源。校验启用客户端的超时、重试及容量配置，非法值使启动失败。
+SDK 无 Spring runtime 依赖，Starter 不要求业务应用手工拼 URL 或构造 HttpClient。
+
+Provider 只做标准 API 适配，不再实现 Evaluation Engine、网络或 fallback。
+targetingKey 是 userId；country/vipLevel/appVersion 提取为内置字段，其余属性进入 attributes，
+不支持 Instant 隐式编码，调用方可显式提供字符串。NUMBER 映射 integer 时使用 intValueExact；
+double/JSON 数值超出有限 double 范围时报类型错误，double 仍有通常的浮点精度限制。
+
+RULE_MATCH → TARGETING_MATCH，PERCENTAGE_ROLLOUT → SPLIT，DISABLED/DEFAULT 保持，
+未知远端 reason → UNKNOWN。业务/未恢复故障映射 OpenFeature errorCode/message，
+缺少 targetingKey 明确返回 TARGETING_KEY_MISSING。
+OpenFeature Client 遇到非空 errorCode 会覆盖 value 为调用方 default；
+所以 SDK 已成功恢复的 LKG 使用 reason=CACHED、无 errorCode，
+并在 rolloutcore.source/error/errorMessage/reason/configVersion/attempts metadata 中保留原始事实。
+Provider 不关闭外部注入的共享客户端，生命周期由调用方或 Starter 管理。
+
+测试界限、实际验证结果和后续工作见 [Day5 报告](DAY5_REPORT.md)。
+
+## Kafka transport 后补：至少一次与每实例订阅
+
+```text
+ControlPlaneService 写事务
+  config CAS → Audit INSERT → Outbox(event_id=固定 UUID, PENDING) → COMMIT
+  → 本 JVM AFTER_COMMIT 失效
+
+OutboxRelayService（原有事务、LIMIT 20 FOR UPDATE SKIP LOCKED）
+  → KafkaConfigEventProducer
+  → 独立 JSON envelope + key=project:environment:flag
+  → KafkaTemplate.send().get(timeout) → Broker ACK
+  → markSent → MySQL COMMIT
+
+Kafka topic → group=rolloutcore-cache-instance-a → A Listener → A ConfigChangedConsumer → A SnapshotCache
+            → group=rolloutcore-cache-instance-b → B Listener → B ConfigChangedConsumer → B SnapshotCache
+```
+
+Boot 4.1.1 管理的 starter-kafka 实际解析为 Spring Kafka 4.1.1、kafka-clients 4.2.1。
+transport=logging 保留原日志开发模式，不启动 config-event listener；transport=kafka 启用真实 adapter。
+实例 ID 必须明确配置且唯一稳定，不生成随机 group，不共享一个默认 group。
+相同 group 的消费者分摊 partition；不同 group 各自维护 offset，才能让每个独立 L1 都收到完整事件流。
+同一实例内 listener concurrency=1，可消费所有分配的 partition。
+新的 group 从 earliest 开始，已有 group 从已提交 offset 恢复；不包含 retention 之外的历史。
+启动时 L1 本来为空，仍从数据库权威配置回源，不把消息日志当完整配置存储。
+
+协议字段 eventId/schemaVersion/projectKey/environmentKey/flagKey/configVersion/occurredAt 均校验，
+拒绝标量强制转换、负版本、错误 UUID/资源 key、不支持的 schema、无时区时间以及 record key 不一致。
+允许未来增加字段；schemaVersion 当前仅接受 1。
+eventId 复用 Outbox 唯一 event_id，occurredAt 取原 created_at（UTC），重试不重新生成。
+三段资源 key 不含冒号，组合无歧义；固定 partition 数下同 key 进入同一 partition。
+多 relay 的 SKIP LOCKED 和多 producer 仍可能先发高版本，不能把 partition 顺序当全局 DB 版本顺序。
+
+Producer 强制 acks=all、enable.idempotence=true、max.in.flight=5、retries=Integer.MAX_VALUE；
+delivery.timeout.ms=sendTimeout、request.timeout.ms=min(1000,sendTimeout)、linger.ms=0，
+满足 delivery timeout >= request timeout + linger。max.block.ms=min(1000,sendTimeout) 限制 metadata/buffer 等待。
+默认 sendTimeout=5s（允许 100ms–60s），send 调用阻塞与 future 等待总计最多约 1s+5s，
+Kafka 内部 retry 由 delivery timeout 收敛。Relay 本身后续轮询仍会重试 PENDING，没有终止投递策略。
+网络等待保留在原 Relay 锁行事务中，20 行最坏可能放大事务时长，这是当前小批量实现的已知限制。
+
+Kafka ACK 和 MySQL SENT 提交不原子：ACK 后宕机/SQL 失败/提交失败会再次发送相同 eventId。
+Kafka producer idempotence 只处理 producer 会话内协议重试造成的部分重复，
+不能消除 Outbox 重投、不同 producer、数据库事务回滚产生的重复。
+这是 at-least-once + semantic idempotency，不是跨 MySQL/Kafka exactly-once。
+配置写事务从不直接依赖 Broker 在线；Broker 不可用时仍可提交 config/Audit/PENDING。
+
+消费端使用 StringDeserializer，然后 adapter 自己校验 JSON/schema/key。
+enable.auto.commit=false，AckMode.RECORD，syncCommits=true。
+成功返回表示本地版本失效已完成，随后容器才提交该记录的 offset；
+失败本地处理默认额外重试两次（0–5 可配），间隔 250ms（0–5s 可配）。
+协议错误不做无意义重试；耗尽/协议错误交由 CommonContainerStoppingErrorHandler 停止实例订阅，
+失败 offset 不被提交，修复并重启可重放。没有静默跳过、DLT 或 processed_event 表。
+无效消息需修复原因或明确运维处置；盲目重启仍会停在同一记录。
+监听器停止不等于业务 HTTP 进程停止；目前未新增订阅专用 health/告警，运维必须观察日志/group lag。
+
+KafkaConfigChangedListener 仅委托既有 ConfigChangedConsumer，
+SnapshotCache 保留原语义：incoming < minimum 忽略；incoming == minimum 仍失效；
+更高版本更新水位、推进 generation、清 L1/negative/LKG 并执行原 Redis 策略。
+相同版本重复可能多一次回源，但不会写配置/Audit/Outbox；create version=0 不能被省略。
+version 水位有 TTL/容量限制，不是永久 eventId 去重；TTL、DB 权威回源及 generation 共同保证缓存行为，
+不承诺缓存瞬时全局一致。仅增加旧版本忽略诊断日志，未替换 Day3/Day4 算法。
+日志包含 eventId/key/version/instance/group；没有高基数 Micrometer tag。
+
+默认 logging 已标 SENT 的历史行不会在切换 Kafka 后自动重放；需要计划迁移/TTL 恢复，
+不能把日志成功解释为以前已广播。
+真实 Broker、双 JVM 和停机恢复验证状态及脚本见 [Kafka E2E 报告](KAFKA_E2E_REPORT.md)。
+
+### 2026-09-16 原生 Kafka 实证边界
+
+手工实验使用 Windows 原生 Kafka 4.2.1、Java 21、KRaft 单节点；
+cluster.id=i3ZTpFF0T0iCxRF54XQiPw，Broker=127.0.0.1:9092、Controller=9093，
+topic=rolloutcore.config-events（3 partitions，replication-factor=1）。
+A（PID 26784 / 8080）和 B（PID 4784 / 8082）各自的 group 均分配到 partition 0、1、2，
+验证 per-instance subscription；不能以共用同一 group 替代这种传播方式。
+
+B warm v0=true 后，经 A 写入 v1=false，两个 group 消费相同 eventId/partition=0/offset=1，
+B 在约 89.5s 返回 v1=false，早于 10m L1 TTL，证明本次主动失效而非自然过期。
+人工停 Broker 时，A 的 v2=true PUT 成功而 B 暂读 v1=false，实际展示了异步最终一致性窗口；
+发送超时后 Relay 记录 retaining PENDING。原 Broker 恢复，未再次 PUT 或手工发事件，
+B Relay 获得同一 v2 eventId 的 ACK，A/B 都消费 partition=0/offset=2，B 最终返回 v2=true。
+共享 Outbox 的任意实例均可领取重试行，不要求配置写入实例负责发送。
+
+该实证不包含恢复后直接 SQL 确认 SENT（本地 mysql.exe DLL/runtime 启动失败），
+不能以 ACK/消费日志替代数据库提交证据；ACK→markSent 仍由自动测试单独验证。
+Docker Compose 未运行，真实 duplicate/out-of-order 独立实验尚未执行。
+Windows .bat 的长 classpath 问题通过 `java -cp ".\libs\*" <MainClass>` 绕过，
+属于本地启动方式，不改变消息协议、事务或一致性架构。

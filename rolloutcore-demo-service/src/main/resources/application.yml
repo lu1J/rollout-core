@@ -1,0 +1,23 @@
+server:
+  port: ${DEMO_PORT:8081}
+spring:
+  application:
+    name: rolloutcore-demo-service
+rolloutcore:
+  sdk:
+    enabled: true
+    base-url: ${ROLLOUTCORE_SDK_BASE_URL:http://127.0.0.1:8080}
+    connect-timeout: 200ms
+    timeout: 500ms
+    max-retries: 1
+    retry-delay: 25ms
+    lkg-ttl: 30s
+    lkg-capacity: 1000
+demo:
+  project-key: ${DEMO_PROJECT_KEY:day5-demo}
+  environment-key: ${DEMO_ENVIRONMENT_KEY:prod}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

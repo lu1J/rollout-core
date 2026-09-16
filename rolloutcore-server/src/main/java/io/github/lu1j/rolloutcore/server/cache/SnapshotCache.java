@@ -180,7 +180,11 @@ public class SnapshotCache implements SnapshotProvider {
         synchronized (fence) {
             // Equal versions still invalidate: a version-0 creation must clear negative cache,
             // and observing a snapshot is not the same as processing its invalidation.
-            if (version < minimum(key)) return;
+            if (version < minimum(key)) {
+                LOG.info("Ignoring stale config invalidation key={} incomingVersion={} minimumVersion={}",
+                        key, version, minimum(key));
+                return;
+            }
             fence.generation++;
             minimumVersions.put(key, Math.max(minimum(key), version));
             // Conservative bounded-memory safety net even if the per-key watermark is evicted or Redis deletion fails.

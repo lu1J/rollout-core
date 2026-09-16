@@ -1,4 +1,6 @@
 spring:
+  kafka:
+    bootstrap-servers: ${ROLLOUTCORE_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
   application:
     name: rolloutcore-server
   datasource:
@@ -18,6 +20,14 @@ spring:
       repositories:
         enabled: false
 rolloutcore:
+  events:
+    transport: ${ROLLOUTCORE_EVENTS_TRANSPORT:logging}
+    instance-id: ${ROLLOUTCORE_INSTANCE_ID:}
+    topic: ${ROLLOUTCORE_KAFKA_TOPIC:rolloutcore.config-events}
+    send-timeout: 5s
+    consumer-retries: 2
+    consumer-retry-delay: 250ms
+    listener-auto-startup: true
   outbox:
     enabled: ${ROLLOUTCORE_OUTBOX_ENABLED:true}
     poll-interval-ms: ${ROLLOUTCORE_OUTBOX_POLL_INTERVAL_MS:1000}

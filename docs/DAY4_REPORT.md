@@ -1,5 +1,33 @@
 # RolloutCore Day4 交付报告
 
+## Kafka 后补（2026-09-16）
+
+Day5 未提交工作保留；本轮在原 Outbox/Relay/版本失效语义上补上真实 Kafka Producer/Listener，
+未改 Outbox 表、写事务和业务幂等算法。仅给低版本忽略分支补诊断日志。
+新增 `spring-boot-starter-kafka`，实际解析 Spring Kafka 4.1.1 / kafka-clients 4.2.1（Boot 4.1.1 管理）。
+消息复用数据库已有稳定 `event_id`，schemaVersion=1，occurredAt 来自 UTC created_at。
+Relay 等 Kafka Broker ack 后才 mark SENT，DB 提交仍可能失败，因此是至少一次 + 消费者语义幂等，非 exactly-once。
+
+每实例使用不同稳定 group：`rolloutcore-cache-{instance-id}`；Kafka 模式缺少 instance-id 启动失败。
+低版本忽略；同版本继续清 L1/negative/LKG、推进 generation，可能多一次 DB reload，非完全 no-op。
+version=0 创建仍能清负缓存。JSON/schema/key 校验在 Listener adapter，缓存算法仍在原 Consumer/Cache。
+关闭 auto commit，RECORD 同步提交；本地失效成功才返回，默认重试两次后停止订阅，失败 offset 不提交。
+无 DLT、无 processed_event 表。LoggingProducer 完整保留，由 transport=logging/kafka 明确切换。
+
+已加入确定性测试和独立 Kafka KRaft Compose/双 JVM E2E 脚本。
+后续 Windows 原生 Kafka 4.2.1 手工实验已通过 CLI smoke、
+`REAL_KAFKA_CROSS_JVM_INVALIDATION=PASSED` 和 `REAL_KAFKA_OUTAGE_RECOVERY=PASSED`。
+A/B 两个 JVM、两个独立 group 消费同一 v1 record；B 在约 89.5s（小于 L1 TTL 600s）返回新版本。
+Broker DOWN 时 A 的配置 v2 PUT 仍成功，B 暂读 v1；A 有 retaining PENDING 日志，
+Broker 恢复后 B 的 Relay 获得该事件 ACK、A/B 均消费并最终返回 v2，没有再次 PUT 或手工重发。
+恢复后最终 SENT 未经 SQL 直接查询：mysql.exe 启动报 -1073741515 / 0xC0000135。
+自动测试的 ACK→markSent 验证与真实消息传播证据分开记录。
+Docker 仍未安装/运行，**Docker Compose E2E=NOT_RUN**；真实重复/乱序独立实验未执行，仍只有自动测试结果。
+依赖证据、最终回归数量、运行步骤和限制见 [KAFKA_E2E_REPORT](KAFKA_E2E_REPORT.md)。
+用户另已确认 MySQL 8.0、Flyway V2/V3、Day5 正常链与停服链通过；该结果不能代替 Kafka E2E。
+
+以下内容是原 Day4 交付时的历史记录，“未接入 Kafka”等描述仅指当时状态。
+
 ## 实现范围
 
 实现 MySQL Outbox、可替换 ConfigEventProducer、定时 Relay 和版本感知 Consumer 入口。
