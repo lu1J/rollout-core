@@ -14,7 +14,7 @@ import javax.sql.DataSource;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-class Day4OutboxTest extends ServiceFixture {
+class TransactionalOutboxTest extends ServiceFixture {
     @Test void allConfigChangesPersistMatchingEvents() {
         service.createConfig("shop", "prod", "pay", new Commands.CreateConfig("old", true), "alice");
         service.updateConfig("shop", "prod", "pay", new Commands.UpdateConfig("old", true, 0L), "alice");

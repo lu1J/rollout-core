@@ -19,6 +19,7 @@ class KafkaConfigurationTest {
     final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(KafkaAutoConfiguration.class))
             .withUserConfiguration(OutboxConfiguration.class,KafkaEventsConfiguration.class)
+            .withBean(io.micrometer.core.instrument.MeterRegistry.class, io.micrometer.core.instrument.simple.SimpleMeterRegistry::new)
             .withBean(ConfigChangedConsumer.class,() -> mock(ConfigChangedConsumer.class))
             .withPropertyValues("rolloutcore.events.listener-auto-startup=false");
     @Test void loggingDefaultDoesNotCreateKafkaAdapterOrSubscription() {

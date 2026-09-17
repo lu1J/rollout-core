@@ -1,7 +1,7 @@
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8080',
     [ValidatePattern('^[a-z0-9._-]{1,100}$')]
-    [string]$ProjectKey = ('day3-' + [Guid]::NewGuid().ToString('N')),
+    [string]$ProjectKey = ('cache-' + [Guid]::NewGuid().ToString('N')),
     [switch]$RedisEnabled,
     [string]$RedisCliPath,
     [string]$RedisHost,
@@ -14,7 +14,7 @@ if ($RedisEnabled -and ([string]::IsNullOrWhiteSpace($RedisCliPath) -or
     throw 'Redis verification requires explicit RedisCliPath, RedisHost and RedisPort. Configure server Redis separately.'
 }
 $BaseUrl = $BaseUrl.TrimEnd('/')
-$operatorName = 'day3-e2e'
+$operatorName = 'cache-e2e'
 
 function Assert-Equal($Actual, $Expected, [string]$Label) {
     if ($Actual -ne $Expected) {
@@ -57,7 +57,7 @@ function Invoke-Api([string]$Method, [string]$Path, $Body, [int]$ExpectedStatus 
 # Run against a server backed by MySQL after Flyway V2. Creates data only; no cleanup/service management.
 $health = Invoke-Api 'GET' '/actuator/health' $null
 Assert-Equal $health.status 'UP' 'health'
-$project = Invoke-Api 'POST' '/api/v1/projects' @{ projectKey = $ProjectKey; name = 'Day2 evaluation' } 201
+$project = Invoke-Api 'POST' '/api/v1/projects' @{ projectKey = $ProjectKey; name = 'Evaluation evaluation' } 201
 Assert-Equal $project.projectKey $ProjectKey 'project key'
 $projectPath = "/api/v1/projects/$ProjectKey"
 $environment = Invoke-Api 'POST' "$projectPath/environments" @{ envKey = 'prod'; name = 'Production' } 201
@@ -133,7 +133,7 @@ Assert-Equal $policyAudits[0].before.configVersion 1 'audit before version'
 Assert-Equal $policyAudits[0].after.configVersion 2 'audit after version'
 Assert-Equal $policyAudits[0].before.evaluationPolicy.rules[0].priority 10 'audit old policy'
 Assert-Equal $policyAudits[0].after.evaluationPolicy.rules[0].priority 5 'audit new policy'
-# Verify Day1 Kill Switch takes precedence and its write preserves the policy.
+# Verify Kill Switch takes precedence and its write preserves the policy.
 $disabled = Invoke-Api 'POST' "$configPath/disable" @{ expectedVersion = 2 }
 Assert-Equal $disabled.version 3 'disable version'
 $request.context.country = 'JP'
@@ -155,7 +155,7 @@ $policy.rules[0].priority = 1
 $policy.rules[0].variantKey = 'old'
 $policy.rollout = @(@{ variantKey = 'new'; weight = 10000 })
 $updated = Invoke-Api 'PUT' "$configPath/evaluation-policy" $policy
-Assert-Equal $updated.version 5 'Day3 policy version'
+Assert-Equal $updated.version 5 'Cache policy version'
 $ruleAfterWrite = Invoke-Api 'POST' '/api/v1/evaluate' $request
 Assert-Equal $ruleAfterWrite.variantKey 'old' 'policy invalidation variant'
 Assert-Equal $ruleAfterWrite.reason 'RULE_MATCH' 'policy invalidation reason'
@@ -197,7 +197,7 @@ $afterCreate = Invoke-Api 'POST' '/api/v1/evaluate' $request
 Assert-Equal $afterCreate.reason 'DEFAULT' 'create clears negative entry'
 Assert-Equal $afterCreate.value $false 'created config evaluates'
 
-Write-Output "REAL_MYSQL_DAY3_E2E=PASSED (running server must use MySQL); project=$ProjectKey"
+Write-Output "REAL_MYSQL_CACHE_E2E=PASSED (running server must use MySQL); project=$ProjectKey"
 if ($RedisEnabled) {
     # Read only the exact snapshot produced by this run. REDISCLI_AUTH may be supplied by the caller.
     $redisKey = "rolloutcore:eval:v1:${ProjectKey}:prod:new-payment-flow"
@@ -209,7 +209,7 @@ if ($RedisEnabled) {
     Assert-Equal $redisSnapshot.policy.rules[0].variantKey 'old' 'real Redis latest policy'
     $ttl = & $RedisCliPath --raw -h $RedisHost -p $RedisPort PTTL $redisKey
     if ($LASTEXITCODE -ne 0 -or [long]$ttl -le 0) { throw 'Redis snapshot must have a positive TTL' }
-    Write-Output 'REAL_REDIS_DAY3_E2E=PASSED (observed real L2 JSON/version/TTL; does not prove every request source)'
+    Write-Output 'REAL_REDIS_CACHE_E2E=PASSED (observed real L2 JSON/version/TTL; does not prove every request source)'
 } else {
-    Write-Output 'REAL_REDIS_DAY3_E2E=NOT_RUN (no explicit Redis verification requested)'
+    Write-Output 'REAL_REDIS_CACHE_E2E=NOT_RUN (no explicit Redis verification requested)'
 }

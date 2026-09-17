@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
-$operatorName = 'day1-e2e'
+$operatorName = 'control-plane-e2e'
 
 function Assert-Equal($Actual, $Expected, [string]$Label) {
     if ($Actual -ne $Expected) {

@@ -8,6 +8,7 @@ workspace/
 !**/src/main/**/target/
 !**/src/test/**/target/
 .kotlin
+__pycache__/
 
 ### IntelliJ IDEA ###
 .idea/modules.xml

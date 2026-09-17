@@ -6,7 +6,8 @@ import java.net.*;
 import java.net.http.*;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.*;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.server.context.WebServerApplicationContext;
 import tools.jackson.databind.json.JsonMapper;
@@ -14,7 +15,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Real demo HTTP -> auto-discovered starter -> real SDK HTTP -> local evaluation fixture. */
 class DemoIntegrationTest {
-    @Test void independentBusinessApplicationUsesHttpSdkAndFallback() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"", "integration"})
+    void independentBusinessApplicationUsesHttpSdkAndFallback(String projectOverride) throws Exception {
         var json = JsonMapper.builder().build();
         var status = new AtomicInteger(200);
         var requests = new AtomicInteger();
@@ -31,7 +34,8 @@ class DemoIntegrationTest {
         });
         evaluation.start();
         try (var app = new SpringApplicationBuilder(DemoApplication.class).run(
-                "--server.port=0", "--spring.main.banner-mode=off", "--demo.project-key=integration",
+                "--server.port=0", "--spring.main.banner-mode=off",
+                projectOverride.isEmpty() ? "--spring.application.name=demo-default-test" : "--demo.project-key=" + projectOverride,
                 "--rolloutcore.sdk.base-url=http://127.0.0.1:"+evaluation.getAddress().getPort(),
                 "--rolloutcore.sdk.max-retries=0");
              var http = HttpClient.newHttpClient()) {
@@ -46,7 +50,7 @@ class DemoIntegrationTest {
             assertEquals("REMOTE",result.path("source").asString());
             assertEquals("NONE",result.path("error").asString());
             var request = json.readTree(requestBody.get());
-            assertEquals("integration",request.path("projectKey").asString());
+            assertEquals(projectOverride.isEmpty() ? "sdk-demo" : projectOverride,request.path("projectKey").asString());
             assertEquals("user1",request.path("context").path("userId").asString());
             assertEquals(1,requests.get());
             status.set(503);

@@ -15,18 +15,32 @@ public class EvaluationService {
     private final RuleEngine rules;
     private final StableBucketService buckets;
     private final ObjectMapper json;
+    private final io.micrometer.core.instrument.MeterRegistry registry;
 
     public EvaluationService(SnapshotProvider snapshots, InputRules inputs, RuleEngine rules,
-            StableBucketService buckets, ObjectMapper json) {
+            StableBucketService buckets, ObjectMapper json, io.micrometer.core.instrument.MeterRegistry registry) {
         this.snapshots = snapshots;
         this.inputs = inputs;
         this.rules = rules;
         this.buckets = buckets;
         this.json = json;
+        this.registry = registry;
     }
 
     /** Cache hits need no database transaction; the repository owns consistent miss reads. */
     public EvaluationResponse evaluate(EvaluateRequest request) {
+        var sample = io.micrometer.core.instrument.Timer.start(registry);
+        String outcome = "error";
+        try {
+            var response = evaluateInternal(request);
+            outcome = response.reason().name().toLowerCase(java.util.Locale.ROOT);
+            return response;
+        } finally {
+            sample.stop(registry.timer("rolloutcore.evaluation", "outcome", outcome));
+        }
+    }
+
+    private EvaluationResponse evaluateInternal(EvaluateRequest request) {
         inputs.command(request);
         var config = snapshots.get(new CacheKey(request.projectKey(), request.environmentKey(), request.flagKey())).snapshot();
         if (config == null) throw BusinessException.notFound("Evaluation configuration");
@@ -55,7 +69,7 @@ public class EvaluationService {
             }
         }
         var selected = config.variants().get(selectedKey);
-        // Rehydrate the response tree with the same numeric-node semantics as Day2's readTree(valueJson).
+        // Rehydrate the response tree with the same numeric-node semantics as the original readTree(valueJson).
         return new EvaluationResponse(request.flagKey(), selectedKey, json.readTree(json.writeValueAsString(selected.value())),
                 reason, config.configVersion(), priority, bucket);
     }

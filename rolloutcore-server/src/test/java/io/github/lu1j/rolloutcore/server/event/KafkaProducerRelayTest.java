@@ -18,7 +18,7 @@ class KafkaProducerRelayTest {
     OutboxRelayService relay() {
         when(mapper.findPending(20)).thenReturn(List.of(row()));
         when(mapper.markSent(eq(42L),any())).thenReturn(1);
-        return new OutboxRelayService(mapper,producer);
+        return new OutboxRelayService(mapper,producer, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
     @Test void sendsConfiguredTopicKeyAndVersionedPayload() {
         when(template.send(anyString(),anyString(),anyString())).thenReturn(CompletableFuture.completedFuture(ack()));
@@ -32,7 +32,7 @@ class KafkaProducerRelayTest {
         var longer = new ConfigEventsProperties(ConfigEventsProperties.Transport.KAFKA,"a",properties().topic(),
                 java.time.Duration.ofSeconds(5),0,java.time.Duration.ZERO,false);
         var relay = relay();
-        relay = new OutboxRelayService(mapper,new KafkaConfigEventProducer(template,codec,longer));
+        relay = new OutboxRelayService(mapper,new KafkaConfigEventProducer(template,codec,longer), new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
         try (var executor = Executors.newSingleThreadExecutor()) {
             var active = executor.submit(relay::relayPending);
             assertTrue(submitted.await(3,TimeUnit.SECONDS));

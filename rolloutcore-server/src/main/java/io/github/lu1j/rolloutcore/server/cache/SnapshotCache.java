@@ -173,7 +173,8 @@ public class SnapshotCache implements SnapshotProvider {
         invalidateForVersion(event.key(), event.latestVersion());
     }
 
-    public void invalidateForVersion(CacheKey key, long version) {
+    /** Returns false only when the version is older than the local watermark. */
+    public boolean invalidateForVersion(CacheKey key, long version) {
         java.util.Objects.requireNonNull(key);
         if (version < 0) throw new IllegalArgumentException("Configuration version must be non-negative");
         Fence fence = fence(key);
@@ -183,7 +184,7 @@ public class SnapshotCache implements SnapshotProvider {
             if (version < minimum(key)) {
                 LOG.info("Ignoring stale config invalidation key={} incomingVersion={} minimumVersion={}",
                         key, version, minimum(key));
-                return;
+                return false;
             }
             fence.generation++;
             minimumVersions.put(key, Math.max(minimum(key), version));
@@ -193,6 +194,7 @@ public class SnapshotCache implements SnapshotProvider {
             l1.invalidate(key); negative.invalidate(key); lkg.invalidate(key);
             metrics.increment("cache_invalidation");
             if (properties.redisEnabled()) invalidateRedis(key, version);
+            return true;
         }
     }
     private static final class Fence { long generation; long bypassRedisUntil; }

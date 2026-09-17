@@ -79,7 +79,7 @@ public class KafkaEventsConfiguration {
         return listener;
     }
     @Bean KafkaConfigChangedListener kafkaConfigChangedListener(KafkaConfigEventCodec codec,
-            ConfigChangedConsumer consumer, ConfigEventsProperties events) {
-        return new KafkaConfigChangedListener(codec, consumer, events);
+            ConfigChangedConsumer consumer, ConfigEventsProperties events, io.micrometer.core.instrument.MeterRegistry registry) {
+        return new KafkaConfigChangedListener(codec, consumer, events, registry);
     }
 }

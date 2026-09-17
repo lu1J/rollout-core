@@ -16,8 +16,13 @@ public class OutboxRelayService {
     private static final Logger LOG = LoggerFactory.getLogger(OutboxRelayService.class);
     private final OutboxEventMapper outbox;
     private final ConfigEventProducer producer;
-    public OutboxRelayService(OutboxEventMapper outbox, ConfigEventProducer producer) {
+    private final io.micrometer.core.instrument.Counter sendSuccess;
+    private final io.micrometer.core.instrument.Counter sendFailure;
+    public OutboxRelayService(OutboxEventMapper outbox, ConfigEventProducer producer,
+            io.micrometer.core.instrument.MeterRegistry registry) {
         this.outbox = outbox; this.producer = producer;
+        sendSuccess = registry.counter("rolloutcore.outbox.send", "outcome", "success");
+        sendFailure = registry.counter("rolloutcore.outbox.send", "outcome", "failure");
     }
 
     // Small locked batch. A future network producer must bound its send timeout.
@@ -26,8 +31,9 @@ public class OutboxRelayService {
     @Transactional
     public void relayPending() {
         for (var event : outbox.findPending(20)) {
-            try { producer.send(event); }
+            try { producer.send(event); sendSuccess.increment(); }
             catch (RuntimeException failure) {
+                sendFailure.increment();
                 // Keep PENDING for the next poll; FAILED is reserved for a future terminal policy.
                 LOG.warn("Outbox send failed; retaining PENDING event id={}", event.getEventId());
                 continue;

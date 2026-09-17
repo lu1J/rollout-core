@@ -45,13 +45,17 @@ mybatis:
   configuration:
     map-underscore-to-camel-case: true
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        rolloutcore.evaluation: true
   health:
     redis:
       enabled: false
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
   endpoint:
     health:
       show-details: never

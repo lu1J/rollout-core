@@ -52,6 +52,15 @@ class ApplicationWiringTest {
                     .andExpect(status().isNotFound());
         });
     }
+    @Test void prometheusExportsExistingCacheAndJvmMetrics() {
+        runner.run(context -> {
+            assertNull(context.getStartupFailure());
+            MockMvcBuilders.webAppContextSetup(context).build().perform(get("/actuator/prometheus"))
+                    .andExpect(status().isOk())
+                    .andExpect(content().string(org.hamcrest.Matchers.containsString("rolloutcore_cache_l1_hit_total")))
+                    .andExpect(content().string(org.hamcrest.Matchers.containsString("jvm_memory_used_bytes")));
+        });
+    }
     @ParameterizedTest
     @ValueSource(strings = {"{\"expectedVersion\":0.5}", "{\"expectedVersion\":\"0\"}", "{\"expectedVersion\":true}"})
     void versionDoesNotAcceptCoercedScalarTypes(String body) {
@@ -74,7 +83,7 @@ class ApplicationWiringTest {
         });
     }
 
-    @Test void day2UsesProductionStrictJsonAndProblemDetailConfiguration() {
+    @Test void policyUsesProductionStrictJsonAndProblemDetailConfiguration() {
         runner.run(context -> {
             assertNull(context.getStartupFailure());
             var mvc = MockMvcBuilders.webAppContextSetup(context).build();

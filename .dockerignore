@@ -1,0 +1,8 @@
+.git
+.idea
+.github
+**/target
+workspace
+.env
+.env.*
+!.env.example

@@ -11,7 +11,7 @@ public class PaymentController {
     private final String project;
     private final String environment;
     public PaymentController(RolloutCoreClient client,
-            @Value("${demo.project-key:day5-demo}") String project,
+            @Value("${demo.project-key:sdk-demo}") String project,
             @Value("${demo.environment-key:prod}") String environment) {
         this.client = client;
         this.project = project;

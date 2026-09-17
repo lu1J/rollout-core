@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-class Day4ConsumerTest extends CacheFixture {
+class ConfigChangedConsumerTest extends CacheFixture {
     @Test void consumerDelegatesToVersionedInvalidation() {
         var cache = mock(SnapshotCache.class);
         new ConfigChangedConsumer(cache).consume(new ConfigChanged(key, 6));
@@ -19,11 +19,11 @@ class Day4ConsumerTest extends CacheFixture {
         var cache = cache(k -> snapshot(version.get(), true));
         assertEquals(5, cache.get(key).snapshot().configVersion());
         var consumer = new ConfigChangedConsumer(cache); version.set(6);
-        consumer.consume(new ConfigChanged(key, 6));
-        consumer.consume(new ConfigChanged(key, 6));
+        assertTrue(consumer.consume(new ConfigChanged(key, 6)));
+        assertTrue(consumer.consume(new ConfigChanged(key, 6)));
         assertEquals(6, cache.get(key).snapshot().configVersion());
         double invalidations = count("cache_invalidation");
-        consumer.consume(new ConfigChanged(key, 5));
+        assertFalse(consumer.consume(new ConfigChanged(key, 5)));
         assertEquals(invalidations, count("cache_invalidation"));
         assertEquals(SnapshotProvider.Source.L1, cache.get(key).source());
         assertEquals(6, redis.version);

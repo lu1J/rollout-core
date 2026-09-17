@@ -5,6 +5,9 @@
     <parent><groupId>io.github.lu1j</groupId><artifactId>rollout-core</artifactId><version>0.1.0-SNAPSHOT</version></parent>
     <artifactId>rolloutcore-server</artifactId>
     <dependencies>
+        <dependency><groupId>io.micrometer</groupId><artifactId>micrometer-registry-prometheus</artifactId></dependency>
+        <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-mysql</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-kafka</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-kafka</artifactId></dependency>
         <dependency><groupId>io.github.lu1j</groupId><artifactId>rolloutcore-domain</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-webmvc</artifactId></dependency>
@@ -24,4 +27,14 @@
             <configuration><argLine>-Djava.io.tmpdir=${project.build.directory}</argLine></configuration>
         </plugin>
     </plugins></build>
+    <profiles>
+        <profile>
+            <id>testcontainers</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId><artifactId>maven-failsafe-plugin</artifactId>
+                <configuration><argLine>-Djava.io.tmpdir=${project.build.directory}</argLine><failIfNoTests>true</failIfNoTests></configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+    </profiles>
 </project>

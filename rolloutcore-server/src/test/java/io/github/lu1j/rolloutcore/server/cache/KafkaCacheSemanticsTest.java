@@ -18,7 +18,7 @@ class KafkaCacheSemanticsTest extends CacheFixture {
     final ConfigEventsProperties settings = new ConfigEventsProperties(ConfigEventsProperties.Transport.KAFKA,
             "instance-a","events",Duration.ofSeconds(1),0,Duration.ZERO,false);
     KafkaConfigChangedListener listener(SnapshotCache cache) {
-        return new KafkaConfigChangedListener(events,new ConfigChangedConsumer(cache),settings);
+        return new KafkaConfigChangedListener(events,new ConfigChangedConsumer(cache),settings, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
     ConsumerRecord<String,String> message(long version) {
         var event = new KafkaConfigChanged("12345678-1234-1234-1234-123456789abc",1,"shop","prod","pay",version,Instant.EPOCH);
@@ -68,7 +68,7 @@ class KafkaCacheSemanticsTest extends CacheFixture {
         when(mapper.markSent(eq(42L),any())).thenReturn(0,1);
         var published = new AtomicInteger();
         ConfigEventProducer acknowledgedTransport = event -> { published.incrementAndGet(); adapter.onMessage(message(7)); };
-        var relay = new OutboxRelayService(mapper,acknowledgedTransport);
+        var relay = new OutboxRelayService(mapper,acknowledgedTransport, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
         assertThrows(IllegalStateException.class,relay::relayPending);
         assertEquals(7,cache.get(key).snapshot().configVersion());
         relay.relayPending(); assertEquals(7,cache.get(key).snapshot().configVersion());

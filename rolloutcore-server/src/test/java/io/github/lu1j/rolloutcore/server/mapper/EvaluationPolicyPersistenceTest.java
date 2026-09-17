@@ -14,7 +14,7 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-class Day2PersistenceTest {
+class EvaluationPolicyPersistenceTest {
     private Configuration configuration;
     @BeforeEach void loadMapper() throws Exception {
         configuration = new Configuration(); configuration.setMapUnderscoreToCamelCase(true);
@@ -22,7 +22,7 @@ class Day2PersistenceTest {
             new XMLMapperBuilder(input, configuration, "mapper/FlagEnvironmentConfigMapper.xml", configuration.getSqlFragments()).parse();
         }
     }
-    @Test void policySqlIsConditionalAndDoesNotWriteDay1Settings() {
+    @Test void policySqlIsConditionalAndDoesNotWriteSwitchSettings() {
         var sql = configuration.getMappedStatement(FlagEnvironmentConfigMapper.class.getName() + ".updatePolicy")
                 .getBoundSql(Map.of("config", new FlagEnvironmentConfig(), "expectedVersion", 7L));
         assertEquals("UPDATE ff_flag_config SET evaluation_policy_json = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
@@ -54,7 +54,7 @@ class Day2PersistenceTest {
             assertNotNull(input);
             assertEquals("ALTER TABLE ff_flag_config ADD COLUMN evaluation_policy_json JSON NULL;", new String(input.readAllBytes(), StandardCharsets.UTF_8).trim());
         }
-        // Git blob digest recorded from Day1 before editing. Does not require Git at test runtime.
+        // Git blob digest recorded from the initial migration. Does not require Git at test runtime.
         try (var input = getClass().getClassLoader().getResourceAsStream("db/migration/V1__init.sql")) {
             assertNotNull(input); byte[] bytes = input.readAllBytes();
             // Git normalizes CRLF in this repository; checksum protects the original SQL content.

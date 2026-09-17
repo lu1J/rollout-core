@@ -1,0 +1,116 @@
+name: rolloutcore
+services:
+  mysql:
+    image: mysql:8.0.36
+    environment:
+      MYSQL_DATABASE: rolloutcore
+      MYSQL_USER: rolloutcore
+      MYSQL_PASSWORD: ${ROLLOUTCORE_DB_PASSWORD:-dev-only-rolloutcore}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dev-only-root}
+    ports: ['127.0.0.1:3306:3306']
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -urolloutcore -D rolloutcore -e "SELECT 1"']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+  redis:
+    image: redis:7.4.2-alpine
+    ports: ['127.0.0.1:6379:6379']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  kafka:
+    image: apache/kafka:4.2.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: CONTROLLER://:29093,INTERNAL://:19092,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      CLUSTER_ID: bQHZQZvVRfOWdFBsAPpUfA
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    ports: ['127.0.0.1:9092:9092']
+    volumes:
+      - kafka-data:/tmp/kraft-combined-logs
+    healthcheck:
+      test: [CMD-SHELL, '/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list > /dev/null 2>&1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+  kafka-init:
+    image: apache/kafka:4.2.1
+    depends_on:
+      kafka: {condition: service_healthy}
+    entrypoint: [/opt/kafka/bin/kafka-topics.sh]
+    command: [--bootstrap-server, kafka:19092, --create, --if-not-exists, --topic, rolloutcore.config-events, --partitions, '3', --replication-factor, '1']
+  server:
+    build: {context: ..}
+    environment: &server-env
+      ROLLOUTCORE_DB_URL: jdbc:mysql://mysql:3306/rolloutcore?connectionTimeZone=UTC&allowPublicKeyRetrieval=true&useSSL=false
+      ROLLOUTCORE_DB_USERNAME: rolloutcore
+      ROLLOUTCORE_DB_PASSWORD: ${ROLLOUTCORE_DB_PASSWORD:-dev-only-rolloutcore}
+      ROLLOUTCORE_CACHE_REDIS_ENABLED: 'true'
+      ROLLOUTCORE_CACHE_L1_TTL: ${ROLLOUTCORE_CACHE_L1_TTL:-10s}
+      ROLLOUTCORE_CACHE_LKG_TTL: ${ROLLOUTCORE_CACHE_LKG_TTL:-5m}
+      ROLLOUTCORE_REDIS_HOST: redis
+      ROLLOUTCORE_EVENTS_TRANSPORT: kafka
+      ROLLOUTCORE_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      ROLLOUTCORE_INSTANCE_ID: compose-a
+    ports: ['127.0.0.1:8080:8080']
+    depends_on: &dependencies
+      mysql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+    healthcheck: &server-health
+      test: [CMD, curl, --fail, --silent, http://localhost:8080/actuator/health]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+  server-b:
+    profiles: [replica]
+    build: {context: ..}
+    environment:
+      <<: *server-env
+      ROLLOUTCORE_INSTANCE_ID: compose-b
+    ports: ['127.0.0.1:8082:8080']
+    depends_on: *dependencies
+    healthcheck: *server-health
+  demo:
+    build:
+      context: ..
+      args: {APP_MODULE: rolloutcore-demo-service}
+    environment:
+      ROLLOUTCORE_SDK_BASE_URL: http://server:8080
+      DEMO_PROJECT_KEY: ${DEMO_PROJECT_KEY:-sdk-demo}
+    ports: ['127.0.0.1:8081:8081']
+    depends_on:
+      server: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://localhost:8081/actuator/health]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    volumes: ['./prometheus.yml:/etc/prometheus/prometheus.yml:ro']
+    ports: ['127.0.0.1:9090:9090']
+    depends_on:
+      server: {condition: service_healthy}
+volumes:
+  mysql-data:
+  kafka-data:

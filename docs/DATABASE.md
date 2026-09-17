@@ -1,4 +1,4 @@
-# RolloutCore 数据库（Day1 + Day2）
+# RolloutCore 数据库
 
 迁移文件：`rolloutcore-server/src/main/resources/db/migration/V1__init.sql`。
 目标为 MySQL 8.0.16+、InnoDB、utf8mb4。Key 列使用 utf8mb4_bin，避免大小写不敏感比较干扰稳定标识。
@@ -25,7 +25,7 @@
 - Config → FeatureFlag、Environment。
 - Config 的 (flag_id, default_variant_id) → Variant 的 (flag_id, id)，数据库阻止引用另一个 Flag 的 Variant。
 - Audit → Project，Environment 和 Flag 外键可空。
-- 没有 ON DELETE CASCADE；Day1 无删除 API，避免历史审计随业务资源隐式消失。
+- 没有 ON DELETE CASCADE；无删除 API，避免历史审计随业务资源隐式消失。
 
 Variant 额外的 (flag_id, id) 唯一索引支撑复合外键，并非查询加速的随意索引。
 除主键、唯一约束和外键所需索引，没有提前建立大量猜测性索引。
@@ -42,7 +42,7 @@ value_json、before_json、after_json 都使用 MySQL JSON。
 Mapper 用绑定参数传递 JSON 文本，不拼接用户输入，不用 ${} 字符串替换。
 Service 用 JsonNode 类型检查 value，不能因为数据库接受 JSON 数字，就允许 BOOLEAN Variant 写入 1。
 
-ResourceStatus 使用 ACTIVE / ARCHIVED 的数据库 CHECK；Day1 只创建 ACTIVE，未提供归档接口。
+ResourceStatus 使用 ACTIVE / ARCHIVED 的数据库 CHECK；只创建 ACTIVE，未提供归档接口。
 Flag 类型有 CHECK；config version >= 0，enabled 只允许 0 或 1。
 created_at / updated_at 是应用生成的 UTC DATETIME(6)。
 
@@ -67,9 +67,9 @@ enable/disable 和完整 Config PUT 共享该语句，不存在绕过版本机�
 ## Flyway 生命周期
 
 Spring Boot 的 Flyway starter 在启动时连接配置的数据源，读取 db/migration，
-创建 flyway_schema_history 并在空数据库执行 V1。该历史表是 Flyway 元数据，不属于上述六张业务表。
+创建 flyway_schema_history 并在空数据库顺序执行 V1、V2、V3。该历史表是 Flyway 元数据，不属于上述六张业务表。
 成功后记录版本与校验和；后续启动不会重复执行 V1。
-不要修改已部署的 V1，后续变更增加 V2/V3。未启用 baseline-on-migrate 或 clean，
+不要修改已部署的迁移，后续变更增加新版本。未启用 baseline-on-migrate 或 clean，
 已有非空数据库需要先明确迁移策略，不能通过自动清理“解决”问题。
 
 MySQL DDL 有隐式提交特性，不能假设失败迁移能像业务 DML 一样整体回滚。
@@ -91,13 +91,13 @@ CONFIG_CREATED、CONFIG_UPDATED、FLAG_ENABLED、FLAG_DISABLED、EVALUATION_POLI
 ## 实际验证状态
 
 真实 MySQL 连接和 Flyway V1 已验证，REAL_MYSQL_E2E=PASSED。
-自动测试不使用 H2、Docker 或外部 MySQL。XML 能加载、参数能绑定以及事务代理行为已纳入自动验证；
+默认单元测试不使用 H2、Docker 或外部 MySQL；可选 IT 使用真实 MySQL Testcontainer。XML 能加载、参数能绑定以及事务代理行为已纳入自动验证；
 完整 HTTP E2E 已验证持久化、version 0→1→2、旧版本 409 和六条成功审计。
 用户在应用层 Fail Fast 加入前，用重复 initial variantKey 触发后续 UNIQUE 冲突，最终查询不到对应 FeatureFlag，确认真实事务回滚。
 现在 HashSet 在首次写入前拒绝重复 initial variantKey；UNIQUE (flag_id, variant_key) 保持不变。
 实际并发竞争和 JSON/外键完整边界未穷尽验证。
 
-## Day2 V2 migration
+## V2 migration
 
 V1 保持原样；新增 `db/migration/V2__add_evaluation_policy.sql`：
 
@@ -125,4 +125,16 @@ before/after 是 JSON 对象，包含 `configVersion` 和 `evaluationPolicy`（�
 GET Config 的 evaluationPolicyJson 保持 domain 字符串表示；policy PUT 响应的 policy 为解析后的对象。
 
 自动测试加载真实 MyBatis XML，并使用 ResultSetHandler 验证列映射；迁移测试验证 V2 内容和 V1 原文校验和。
-这些测试不实际执行 MySQL DDL。`REAL_MYSQL_DAY2_E2E=NOT_RUN`；需由用户启动连接 MySQL 的新 JAR 并运行 day2-e2e.ps1。
+这些 XML 单元测试不执行 MySQL DDL；实际中间件覆盖与执行状态见 [工程验证](ENGINEERING_VALIDATION.md)。
+
+## V3 Transactional Outbox
+
+outbox_event 包含用户指定的全部字段：id、event_id、event_type、project_key、
+environment_key、flag_key、version、payload、status、created_at、updated_at。
+使用 InnoDB、JSON payload、唯一 event_id、非负 version 约束、状态约束与 (status,id) 扫描索引。
+状态枚举包含 PENDING/SENT/FAILED。
+
+Mapper 提供 insert/findPending/markSent。
+findPending 在 Relay 事务内执行 ORDER BY id LIMIT 20 FOR UPDATE SKIP LOCKED，
+避免并行 Relay 正常执行时同时处理相同行。
+markSent 仅更新仍为 PENDING 的行，并更新 updated_at。

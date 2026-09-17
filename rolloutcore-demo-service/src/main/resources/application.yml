@@ -14,7 +14,7 @@ rolloutcore:
     lkg-ttl: 30s
     lkg-capacity: 1000
 demo:
-  project-key: ${DEMO_PROJECT_KEY:day5-demo}
+  project-key: ${DEMO_PROJECT_KEY:sdk-demo}
   environment-key: ${DEMO_ENVIRONMENT_KEY:prod}
 management:
   endpoints:

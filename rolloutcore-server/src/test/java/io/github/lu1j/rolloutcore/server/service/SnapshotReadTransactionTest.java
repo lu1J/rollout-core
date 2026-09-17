@@ -35,7 +35,7 @@ class SnapshotReadTransactionTest extends ServiceFixture {
         try (var factory = Validation.buildDefaultValidatorFactory()) {
             var cache = new SnapshotCache(properties, mock(L2SnapshotStore.class), new SnapshotCodec(json), repository::load, registry,
                     com.github.benmanes.caffeine.cache.Ticker.systemTicker());
-            var evaluation = new EvaluationService(cache, new InputRules(factory.getValidator()), new RuleEngine(), new StableBucketService(), json);
+            var evaluation = new EvaluationService(cache, new InputRules(factory.getValidator()), new RuleEngine(), new StableBucketService(), json, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
             var request = new EvaluationCommands.EvaluateRequest("shop", "prod", "pay", new EvaluationContext("u", null, null, null, null));
             var first = evaluation.evaluate(request); assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
             verify(connection).setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ); verify(connection).commit(); verify(connection).close();

@@ -27,7 +27,7 @@ class StableBucketServiceTest {
             if (bucket < 1000) hits++;
         }
         assertTrue(hits >= 4500 && hits <= 5500, "10% allocation hits: " + hits);
-        System.out.println("DAY2_DISTRIBUTION hits=" + hits + "/50000");
+        System.out.println("ROLLOUT_DISTRIBUTION hits=" + hits + "/50000");
     }
 
     @Test void repeatedInputAndUnambiguousSeparators() {

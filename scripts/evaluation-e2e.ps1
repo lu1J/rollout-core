@@ -1,12 +1,12 @@
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8080',
     [ValidatePattern('^[a-z0-9._-]{1,100}$')]
-    [string]$ProjectKey = ('day2-' + [Guid]::NewGuid().ToString('N'))
+    [string]$ProjectKey = ('evaluation-' + [Guid]::NewGuid().ToString('N'))
 )
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
-$operatorName = 'day2-e2e'
+$operatorName = 'evaluation-e2e'
 
 function Assert-Equal($Actual, $Expected, [string]$Label) {
     if ($Actual -ne $Expected) {
@@ -49,7 +49,7 @@ function Invoke-Api([string]$Method, [string]$Path, $Body, [int]$ExpectedStatus 
 # Run against a server backed by MySQL after Flyway V2. Creates data only; no cleanup/service management.
 $health = Invoke-Api 'GET' '/actuator/health' $null
 Assert-Equal $health.status 'UP' 'health'
-$project = Invoke-Api 'POST' '/api/v1/projects' @{ projectKey = $ProjectKey; name = 'Day2 evaluation' } 201
+$project = Invoke-Api 'POST' '/api/v1/projects' @{ projectKey = $ProjectKey; name = 'Evaluation evaluation' } 201
 Assert-Equal $project.projectKey $ProjectKey 'project key'
 $projectPath = "/api/v1/projects/$ProjectKey"
 $environment = Invoke-Api 'POST' "$projectPath/environments" @{ envKey = 'prod'; name = 'Production' } 201
@@ -125,7 +125,7 @@ Assert-Equal $policyAudits[0].before.configVersion 1 'audit before version'
 Assert-Equal $policyAudits[0].after.configVersion 2 'audit after version'
 Assert-Equal $policyAudits[0].before.evaluationPolicy.rules[0].priority 10 'audit old policy'
 Assert-Equal $policyAudits[0].after.evaluationPolicy.rules[0].priority 5 'audit new policy'
-# Verify Day1 Kill Switch takes precedence and its write preserves the policy.
+# Verify Kill Switch takes precedence and its write preserves the policy.
 $disabled = Invoke-Api 'POST' "$configPath/disable" @{ expectedVersion = 2 }
 Assert-Equal $disabled.version 3 'disable version'
 $request.context.country = 'JP'
@@ -140,4 +140,4 @@ $restored = Invoke-Api 'POST' '/api/v1/evaluate' $request
 Assert-Equal $restored.reason 'RULE_MATCH' 'switch preserves policy'
 Assert-Equal $restored.matchedRulePriority 5 'latest policy restored'
 Assert-Equal $restored.configVersion 4 'latest config version'
-Write-Output "REAL_MYSQL_DAY2_E2E=PASSED (running server must use MySQL); project=$ProjectKey"
+Write-Output "REAL_MYSQL_EVALUATION_E2E=PASSED (running server must use MySQL); project=$ProjectKey"

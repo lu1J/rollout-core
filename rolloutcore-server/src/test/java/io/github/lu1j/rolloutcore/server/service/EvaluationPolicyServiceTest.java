@@ -15,7 +15,7 @@ import static io.github.lu1j.rolloutcore.server.evaluation.EvaluationPolicy.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-class Day2ServiceTest extends ServiceFixture {
+class EvaluationPolicyServiceTest extends ServiceFixture {
     private EvaluationService evaluation;
     private ValidatorFactory factory;
     private StableBucketService buckets;
@@ -37,7 +37,7 @@ class Day2ServiceTest extends ServiceFixture {
     private EvaluationService evaluationUsing(io.github.lu1j.rolloutcore.server.cache.SnapshotRepository source) {
         return new EvaluationService(key -> new io.github.lu1j.rolloutcore.server.cache.SnapshotProvider.LoadResult(
                 source.load(key), io.github.lu1j.rolloutcore.server.cache.SnapshotProvider.Source.DB),
-                new InputRules(factory.getValidator()), new RuleEngine(), buckets, json);
+                new InputRules(factory.getValidator()), new RuleEngine(), buckets, json, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
 
     private EvaluateRequest request(String country) {
@@ -136,7 +136,7 @@ class Day2ServiceTest extends ServiceFixture {
         assertEquals(400, assertThrows(BusinessException.class, () -> service.updatePolicy("shop", "prod", "pay", invalid, "alice")).getStatus());
         verify(configs, never()).updatePolicy(any(), anyLong()); verifyNoInteractions(audits);
     }
-    @Test void policyAndDay1SwitchShareVersionAndOrdinaryUpdatePreservesPolicy() {
+    @Test void policyAndKillSwitchShareVersionAndOrdinaryUpdatePreservesPolicy() {
         service.updatePolicy("shop", "prod", "pay", update(0), "alice");
         String policyJson = config.getEvaluationPolicyJson();
         service.setEnabled("shop", "prod", "pay", new Commands.SwitchFlag(1L), true, "alice");
